@@ -51,29 +51,42 @@ FIELD_KEYWORDS = {
 DATE_RE = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})")
 TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
 TIME_RANGE_RE = re.compile(r"(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})")
+HEBREW_LETTER_RE = re.compile("[֐-׿]")
+RUN_RE = re.compile(r"\d+|\D+")
 
 MIN_HEADER_KEYWORD_HITS = 2
 
 
+def fix_bidi_line(line: str) -> str:
+    """Corrects a real Hebrew-PDF quirk (confirmed against an actual SCE
+    college export): some PDF generators draw Hebrew glyphs in an order
+    that pdfminer's own RTL heuristic doesn't undo correctly, while
+    embedded digit runs (dates/times/course/room codes) come through
+    correctly either way -- e.g. a room "ספרא100" extracts as "100ארפס"
+    (Hebrew letters flipped, but the "100" digit run itself untouched and
+    just relocated). Skip lines with no Hebrew letters at all (pure
+    dates/times/codes) entirely. For lines that do have Hebrew, split into
+    alternating digit/non-digit runs, reverse the run *order*, and reverse
+    characters only within non-digit runs -- proper bidi-style reordering
+    that puts a mixed Hebrew+digit cell like a room number back together
+    correctly instead of just skipping it."""
+    if not HEBREW_LETTER_RE.search(line):
+        return line
+    runs = RUN_RE.findall(line)
+    runs.reverse()
+    return "".join(run if run[0].isdigit() else run[::-1] for run in runs)
+
+
 def normalize_cell(cell, reverse: bool = False) -> str:
-    """`reverse` corrects a real Hebrew-PDF quirk (confirmed against an
-    actual SCE college export): some PDF generators draw Hebrew glyphs in
-    an order that pdfminer's own RTL heuristic doesn't undo correctly,
-    while embedded digit runs (dates/times/course codes) come through
-    fine either way. Reversing only the non-digit *lines* of a cell (a
-    multi-line cell can mix a Hebrew line with a digit-bearing line, e.g.
-    a wrapped course-group code) fixes the Hebrew without corrupting
-    dates/times. Whether a given PDF needs this at all is decided once per
-    table by `detect_header_row` -- see its docstring."""
+    """`reverse` is decided once per table by `detect_header_row` -- see
+    its docstring -- and applied per-line via `fix_bidi_line` (a multi-line
+    cell can mix a Hebrew line with a digit-only line, e.g. a wrapped
+    course-group code, which must not be touched)."""
     if cell is None:
         return ""
     text = str(cell)
     if reverse:
-        lines = text.split("\n")
-        text = "\n".join(
-            line[::-1] if not any(ch.isdigit() for ch in line) else line
-            for line in lines
-        )
+        text = "\n".join(fix_bidi_line(line) for line in text.split("\n"))
     return re.sub(r"\s+", " ", text).strip()
 
 
