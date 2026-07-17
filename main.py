@@ -35,7 +35,11 @@ app.add_middleware(
 # before the bare "שעה" keyword (which also appears inside it) can claim it
 # for start_time instead.
 FIELD_KEYWORDS = {
-    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "מקצוע", "קורס"],
+    # "שם שיעור" (SCE college's own header wording, confirmed against a real
+    # exam-schedule PDF) must stay a full two-word phrase, not a bare
+    # "שיעור" -- that would also match "קוד שיעור" (the course-code column)
+    # since match_field does substring matching per header cell.
+    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "מקצוע", "קורס"],
     "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך"],
     "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום"],
     "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה"],
