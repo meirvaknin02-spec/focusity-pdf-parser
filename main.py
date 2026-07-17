@@ -55,10 +55,26 @@ TIME_RANGE_RE = re.compile(r"(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})")
 MIN_HEADER_KEYWORD_HITS = 2
 
 
-def normalize_cell(cell) -> str:
+def normalize_cell(cell, reverse: bool = False) -> str:
+    """`reverse` corrects a real Hebrew-PDF quirk (confirmed against an
+    actual SCE college export): some PDF generators draw Hebrew glyphs in
+    an order that pdfminer's own RTL heuristic doesn't undo correctly,
+    while embedded digit runs (dates/times/course codes) come through
+    fine either way. Reversing only the non-digit *lines* of a cell (a
+    multi-line cell can mix a Hebrew line with a digit-bearing line, e.g.
+    a wrapped course-group code) fixes the Hebrew without corrupting
+    dates/times. Whether a given PDF needs this at all is decided once per
+    table by `detect_header_row` -- see its docstring."""
     if cell is None:
         return ""
-    return re.sub(r"\s+", " ", str(cell)).strip()
+    text = str(cell)
+    if reverse:
+        lines = text.split("\n")
+        text = "\n".join(
+            line[::-1] if not any(ch.isdigit() for ch in line) else line
+            for line in lines
+        )
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def normalize_date(raw: str) -> Optional[str]:
@@ -104,24 +120,30 @@ def match_field(header_cell: str) -> Optional[str]:
     return None
 
 
-def detect_header_row(table) -> int:
-    """Pick the row (within the first few) with the most keyword hits,
-    so a title row above the real header doesn't get mistaken for it."""
-    best_idx, best_score = -1, 0
+def detect_header_row(table):
+    """Pick the (row, needs_reverse) pair -- within the first few rows,
+    trying both as-extracted and reversed -- with the most keyword hits,
+    so a title row above the real header doesn't get mistaken for it and
+    so the reversal quirk (see normalize_cell) is detected per-table
+    instead of assumed. Returns (-1, False) if nothing scores high enough."""
+    best_idx, best_score, best_reverse = -1, 0, False
     for idx, row in enumerate(table[:5]):
-        score = sum(1 for cell in row if match_field(normalize_cell(cell)))
-        if score > best_score:
-            best_idx, best_score = idx, score
-    return best_idx if best_score >= MIN_HEADER_KEYWORD_HITS else -1
+        for reverse in (False, True):
+            score = sum(1 for cell in row if match_field(normalize_cell(cell, reverse)))
+            if score > best_score:
+                best_idx, best_score, best_reverse = idx, score, reverse
+    if best_score < MIN_HEADER_KEYWORD_HITS:
+        return -1, False
+    return best_idx, best_reverse
 
 
-def map_columns(header_row) -> dict:
+def map_columns(header_row, reverse: bool) -> dict:
     """field -> column index. First cell to match a field wins, so a
     generic keyword ("שעה") can't steal a column already claimed by a
     more specific one scanned earlier in the same row."""
     mapping = {}
     for idx, raw_cell in enumerate(header_row):
-        field = match_field(normalize_cell(raw_cell))
+        field = match_field(normalize_cell(raw_cell, reverse))
         if field and field not in mapping:
             mapping[field] = idx
     return mapping
@@ -130,10 +152,10 @@ def map_columns(header_row) -> dict:
 def parse_table(table) -> list:
     if not table:
         return []
-    header_idx = detect_header_row(table)
+    header_idx, reverse = detect_header_row(table)
     if header_idx == -1:
         return []
-    mapping = map_columns(table[header_idx])
+    mapping = map_columns(table[header_idx], reverse)
     if "course_name" not in mapping or "date" not in mapping:
         return []
 
@@ -141,7 +163,7 @@ def parse_table(table) -> list:
         idx = mapping.get(field)
         if idx is None or idx >= len(row):
             return ""
-        return normalize_cell(row[idx])
+        return normalize_cell(row[idx], reverse)
 
     records = []
     for row in table[header_idx + 1:]:
