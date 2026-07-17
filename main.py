@@ -194,6 +194,26 @@ def health():
     return {"status": "ok"}
 
 
+# Temporary diagnostic endpoint -- see the note on the earlier removed
+# version in git history. Re-added to debug a real-world file.
+# TODO: remove once the parser has been validated against real files.
+@app.post("/debug-extract")
+async def debug_extract(file: UploadFile = File(...)):
+    contents = await file.read()
+    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+        out = []
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            out.append({
+                "num_tables": len(tables),
+                "tables_lines_strategy": tables,
+                "tables_text_strategy": page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}),
+                "num_lines": len(page.lines),
+                "num_rects": len(page.rects),
+            })
+    return out
+
+
 @app.post("/parse-pdf")
 async def parse_pdf(file: UploadFile = File(...)):
     filename = file.filename or ""
