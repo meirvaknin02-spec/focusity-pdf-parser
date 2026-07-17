@@ -190,25 +190,6 @@ def health():
     return {"status": "ok"}
 
 
-# Temporary diagnostic endpoint -- returns pdfplumber's raw extraction so
-# extraction failures can be debugged from outside (no local Python
-# interpreter is available in the dev environment this was built in).
-# TODO: remove once the parser has been validated against real files.
-@app.post("/debug-extract")
-async def debug_extract(file: UploadFile = File(...)):
-    contents = await file.read()
-    with pdfplumber.open(io.BytesIO(contents)) as pdf:
-        out = []
-        for page in pdf.pages:
-            out.append({
-                "text": page.extract_text(),
-                "tables_lines_strategy": page.extract_tables(),
-                "tables_text_strategy": page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}),
-                "chars_sample": [{"text": c["text"], "x0": c["x0"], "top": c["top"]} for c in page.chars[:40]],
-            })
-    return out
-
-
 @app.post("/parse-pdf")
 async def parse_pdf(file: UploadFile = File(...)):
     filename = file.filename or ""
