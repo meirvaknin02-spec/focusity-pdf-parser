@@ -250,15 +250,24 @@ async def debug_class_schedule(file: UploadFile = File(...)):
             }
             for w in words
         ]
-        tables = page.extract_tables()
+        rects = [
+            {"x0": round(r["x0"], 1), "x1": round(r["x1"], 1), "top": round(r["top"], 1),
+             "bottom": round(r["bottom"], 1), "w": round(r["width"], 1), "h": round(r["height"], 1)}
+            for r in page.rects
+        ]
+        # Horizontal lines only, with their x-span, for cell-boundary detection.
+        hlines = [
+            {"top": round(ln["top"], 1), "x0": round(ln["x0"], 1), "x1": round(ln["x1"], 1)}
+            for ln in page.lines if abs(ln["top"] - ln["bottom"]) < 1.0
+        ]
         return {
             "page_width": round(page.width, 1),
             "page_height": round(page.height, 1),
             "num_words": len(out_words),
-            "num_lines": len(page.lines),
-            "num_rects": len(page.rects),
-            "num_tables": len(tables),
-            "table0_dims": [len(tables[0]), len(tables[0][0])] if tables and tables[0] else None,
+            "num_rects": len(rects),
+            "num_hlines": len(hlines),
+            "rects": rects,
+            "hlines": hlines,
             "words": out_words,
         }
 
