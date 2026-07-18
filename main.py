@@ -224,9 +224,200 @@ def parse_table(table) -> list:
     return records
 
 
+DAY_NAME_TO_IDX = {
+    "ראשון": 0, "שני": 1, "שלישי": 2, "רביעי": 3, "חמישי": 4, "שישי": 5, "שבת": 6,
+}
+TIME_LABEL_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+COURSE_CODE_RE = re.compile(r"\b(\d{6,7}-\d{1,2})\b")
+ROOM_NUM_RE = re.compile(r"^\d{3,5}$")
+BUILDING_RE = re.compile(r"בניין|בנין")
+METADATA_RE = re.compile(r'ש["״]ש|נ["״]ז')
+LECTURER_TITLE_RE = re.compile(r'^(פרופ|ד["״]ר|דר|מר |גב["׳\'׳]|גברת|מהנדס|עו["״]ד)')
+
+
+def _median(nums):
+    s = sorted(nums)
+    n = len(s)
+    if n == 0:
+        return 0
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def _group_words_into_lines(words):
+    """Cluster words (each {text,x0,x1,top,bottom}) sharing a baseline into
+    visual lines, ordered top-to-bottom; within a line words are joined
+    right-to-left (RTL) and bidi-corrected."""
+    ws = sorted(words, key=lambda w: (w["top"], -w["x0"]))
+    lines = []
+    cur = None
+    for w in ws:
+        if cur is not None and abs(w["top"] - cur["top"]) <= 3:
+            cur["words"].append(w)
+            cur["bottom"] = max(cur["bottom"], w["bottom"])
+        else:
+            cur = {"top": w["top"], "bottom": w["bottom"], "words": [w]}
+            lines.append(cur)
+    out = []
+    for ln in lines:
+        ln["words"].sort(key=lambda w: -w["x0"])  # RTL: rightmost first
+        text = " ".join(fix_bidi_line(w["text"]) for w in ln["words"])
+        out.append({"top": ln["top"], "bottom": ln["bottom"], "text": text})
+    return out
+
+
+def parse_class_schedule(page):
+    """Parse a weekly-calendar-grid timetable (days across columns, half-hour
+    rows, each class a bordered cell). Returns records or None if the page is
+    not a recognizable grid schedule.
+
+    Geometry is derived entirely from the PDF's own day-header words, time
+    labels, and class-cell rectangles -- no hardcoded coordinates -- so it
+    generalizes across institutions that export this calendar layout."""
+    words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+
+    # 1. Day-header row: words that are day names give each day's x-center.
+    day_centers = []  # (x_center, day_idx)
+    header_bottom = 0
+    for w in words:
+        t = fix_bidi_line(w["text"]).strip()
+        if t in DAY_NAME_TO_IDX:
+            day_centers.append(((w["x0"] + w["x1"]) / 2, DAY_NAME_TO_IDX[t]))
+            header_bottom = max(header_bottom, w["bottom"])
+    if len(day_centers) < 3:
+        return None
+
+    def nearest_day(xc):
+        return min(day_centers, key=lambda p: abs(p[0] - xc))[1]
+
+    # Day-column width from the spacing between adjacent day centers.
+    xs = sorted(c for c, _ in day_centers)
+    gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+    col_w = _median(gaps) if gaps else 80
+
+    # 2. Time labels (below the header) -> discrete y->time snap points.
+    time_labels = []  # (top, "HH:MM")
+    time_label_x = []
+    for w in words:
+        m = TIME_LABEL_RE.match(w["text"].strip())
+        if m and w["top"] > header_bottom - 6:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if hh <= 23 and int(mm) <= 59:
+                time_labels.append((w["top"], f"{hh:02d}:{mm}"))
+                time_label_x.append((w["x0"] + w["x1"]) / 2)
+    if len(time_labels) < 2:
+        return None
+    time_labels.sort()
+    time_col_center = _median(time_label_x)
+
+    def snap_time(y):
+        return min(time_labels, key=lambda p: abs(p[0] - y))[1]
+
+    # 3. Class cells: rectangles below the header, one day-column wide, sitting
+    # in a day column (not the time column).
+    class_rects = []
+    for r in page.rects:
+        if r["top"] < header_bottom or r["height"] < 6:
+            continue
+        if not (0.5 * col_w < r["width"] < 1.5 * col_w):
+            continue
+        xc = (r["x0"] + r["x1"]) / 2
+        if abs(xc - time_col_center) < col_w * 0.5:
+            continue  # the time column itself
+        day = nearest_day(xc)
+        # Only accept if the rect actually lines up with a day center.
+        if min(abs(xc - c) for c, _ in day_centers) > col_w * 0.6:
+            continue
+        class_rects.append((r, day))
+    if not class_rects:
+        return None
+
+    # 4. For each class cell, collect the words inside and classify its lines.
+    records = []
+    for r, day in class_rects:
+        inside = [
+            w for w in words
+            if r["top"] - 1 <= (w["top"] + w["bottom"]) / 2 <= r["bottom"] + 1
+            and r["x0"] - 1 <= (w["x0"] + w["x1"]) / 2 <= r["x1"] + 1
+        ]
+        if not inside:
+            continue
+        lines = _group_words_into_lines(inside)
+
+        start_time = snap_time(r["top"])
+        end_time = snap_time(r["bottom"])
+
+        lecturer = ""
+        room_num = ""
+        building = ""
+        course_code = ""
+        credits = None
+        name_lines = []
+        seen_lecturer = False
+
+        for ln in lines:
+            text = ln["text"].strip()
+            if not text:
+                continue
+            code_m = COURSE_CODE_RE.search(text)
+            if code_m and not course_code:
+                course_code = code_m.group(1)
+                # a line that is only the code carries nothing else
+                if ROOM_NUM_RE.match(text.replace(course_code, "").strip() or "x"):
+                    pass
+                continue
+            if METADATA_RE.search(text):
+                cm = re.search(r'נ["״]ז[:\s]*([0-9]+)', text)
+                if cm and credits is None:
+                    credits = int(cm.group(1))
+                continue
+            if ROOM_NUM_RE.match(text):
+                if not room_num:
+                    room_num = text
+                continue
+            if BUILDING_RE.search(text):
+                if not building:
+                    building = text
+                continue
+            if LECTURER_TITLE_RE.match(text):
+                if not lecturer:
+                    lecturer = text
+                seen_lecturer = True
+                continue
+            # Otherwise it's course-name text (only before the lecturer line).
+            if not seen_lecturer:
+                name_lines.append(text)
+
+        course_name = " ".join(name_lines).strip()
+        location = " ".join(x for x in (building, room_num) if x).strip()
+
+        records.append({
+            "course_name": course_name,
+            "day": day,
+            "start_time": start_time,
+            "end_time": end_time,
+            "lecturer": lecturer,
+            "room": location,
+            "course_code": course_code,
+            "credits": credits if credits is not None else "",
+            "_top": round(r["top"], 1),
+        })
+
+    records.sort(key=lambda c: (c["day"], c["start_time"]))
+    for c in records:
+        c.pop("_top", None)
+    return records
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/debug-parse-class")
+async def debug_parse_class(file: UploadFile = File(...)):
+    contents = await file.read()
+    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+        return parse_class_schedule(pdf.pages[0])
 
 
 # Temporary diagnostic endpoint for designing the weekly-grid parser -- returns
