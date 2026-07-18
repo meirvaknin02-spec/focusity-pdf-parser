@@ -243,10 +243,14 @@ def _median(nums):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def _group_words_into_lines(words):
+def _group_words_into_lines(words, page, x0, x1):
     """Cluster words (each {text,x0,x1,top,bottom}) sharing a baseline into
-    visual lines, ordered top-to-bottom; within a line words are joined
-    right-to-left (RTL) and bidi-corrected."""
+    visual lines, ordered top-to-bottom. Each line's text is read by cropping
+    that line's thin horizontal strip and running pdfminer's own layout
+    extraction -- this reconstructs multi-word Hebrew far more reliably than
+    joining pdfplumber's per-word tokens (whose RTL segmentation garbles
+    lines that mix Hebrew with parentheses/Latin), while the strip's tight
+    height avoids the vertical bleed a full-cell crop suffers at borders."""
     ws = sorted(words, key=lambda w: (w["top"], -w["x0"]))
     lines = []
     cur = None
@@ -259,8 +263,18 @@ def _group_words_into_lines(words):
             lines.append(cur)
     out = []
     for ln in lines:
-        ln["words"].sort(key=lambda w: -w["x0"])  # RTL: rightmost first
-        text = " ".join(fix_bidi_line(w["text"]) for w in ln["words"])
+        try:
+            strip = page.crop((x0, ln["top"] - 1, x1, ln["bottom"] + 1))
+            raw = strip.extract_text() or ""
+        except Exception:
+            raw = ""
+        # A thin strip should yield one visual line; if pdfminer still returns
+        # several, join them. Fall back to per-word joining if the crop is empty.
+        if raw.strip():
+            text = " ".join(fix_bidi_line(p) for p in raw.split("\n") if p.strip())
+        else:
+            ln["words"].sort(key=lambda w: -w["x0"])
+            text = " ".join(fix_bidi_line(w["text"]) for w in ln["words"])
         out.append({"top": ln["top"], "bottom": ln["bottom"], "text": text})
     return out
 
@@ -348,7 +362,7 @@ def parse_class_schedule(page):
         ]
         if not inside:
             continue
-        lines = _group_words_into_lines(inside)
+        lines = _group_words_into_lines(inside, page, r["x0"], r["x1"])
 
         start_time = snap_time(r["top"])
         end_time = snap_time(r["bottom"])
