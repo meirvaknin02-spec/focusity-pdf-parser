@@ -295,19 +295,26 @@ def parse_class_schedule(page):
     col_w = _median(gaps) if gaps else 80
 
     # 2. Time labels (below the header) -> discrete y->time snap points.
-    time_labels = []  # (top, "HH:MM")
-    time_label_x = []
+    raw_labels = []  # (top, "HH:MM", x_center)
     for w in words:
         m = TIME_LABEL_RE.match(w["text"].strip())
         if m and w["top"] > header_bottom - 6:
             hh, mm = int(m.group(1)), int(m.group(2))
-            if hh <= 23 and int(mm) <= 59:
-                time_labels.append((w["top"], f"{hh:02d}:{mm}"))
-                time_label_x.append((w["x0"] + w["x1"]) / 2)
-    if len(time_labels) < 2:
+            if hh <= 23 and mm <= 59:
+                raw_labels.append((w["top"], f"{hh:02d}:{mm:02d}", (w["x0"] + w["x1"]) / 2))
+    if len(raw_labels) < 2:
         return None
-    time_labels.sort()
-    time_col_center = _median(time_label_x)
+    raw_labels.sort()
+    # Keep only the main regularly-spaced ladder: drop outliers like the footer
+    # print-time ("שעת הדפסה : 19:16") that sits far below the last real row.
+    row_gap = _median([raw_labels[i + 1][0] - raw_labels[i][0] for i in range(len(raw_labels) - 1)])
+    kept = [raw_labels[0]]
+    for prev, cur in zip(raw_labels, raw_labels[1:]):
+        if cur[0] - kept[-1][0] <= max(row_gap * 3, 30):
+            kept.append(cur)
+    time_labels = [(t, s) for t, s, _ in kept]
+    time_col_center = _median([x for _, _, x in kept])
+    grid_bottom = time_labels[-1][0] + max(row_gap, 12)
 
     def snap_time(y):
         return min(time_labels, key=lambda p: abs(p[0] - y))[1]
@@ -316,7 +323,7 @@ def parse_class_schedule(page):
     # in a day column (not the time column).
     class_rects = []
     for r in page.rects:
-        if r["top"] < header_bottom or r["height"] < 6:
+        if r["top"] < header_bottom or r["top"] > grid_bottom or r["height"] < 6:
             continue
         if not (0.5 * col_w < r["width"] < 1.5 * col_w):
             continue
@@ -399,12 +406,10 @@ def parse_class_schedule(page):
             "room": location,
             "course_code": course_code,
             "credits": credits if credits is not None else "",
-            "_top": round(r["top"], 1),
+            "_bbox": (r["x0"], r["top"], r["x1"], r["bottom"]),
         })
 
     records.sort(key=lambda c: (c["day"], c["start_time"]))
-    for c in records:
-        c.pop("_top", None)
     return records
 
 
@@ -417,7 +422,14 @@ def health():
 async def debug_parse_class(file: UploadFile = File(...)):
     contents = await file.read()
     with pdfplumber.open(io.BytesIO(contents)) as pdf:
-        return parse_class_schedule(pdf.pages[0])
+        page = pdf.pages[0]
+        records = parse_class_schedule(page)
+        for rec in records or []:
+            x0, top, x1, bottom = rec["_bbox"]
+            crop = page.crop((x0, top, x1, bottom))
+            txt = crop.extract_text() or ""
+            rec["_crop_lines"] = [fix_bidi_line(ln) for ln in txt.split("\n") if ln.strip()]
+        return records
 
 
 # Temporary diagnostic endpoint for designing the weekly-grid parser -- returns
