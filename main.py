@@ -229,6 +229,40 @@ def health():
     return {"status": "ok"}
 
 
+# Temporary diagnostic endpoint for designing the weekly-grid parser -- returns
+# words with positions (bidi-fixed) plus table/line counts so the real grid
+# geometry can be inspected without a local Python interpreter.
+# TODO: remove once the class-schedule parser is validated.
+@app.post("/debug-class-schedule")
+async def debug_class_schedule(file: UploadFile = File(...)):
+    contents = await file.read()
+    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+        page = pdf.pages[0]
+        words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+        out_words = [
+            {
+                "t": fix_bidi_line(w["text"]),
+                "raw": w["text"],
+                "x0": round(w["x0"], 1),
+                "x1": round(w["x1"], 1),
+                "top": round(w["top"], 1),
+                "bottom": round(w["bottom"], 1),
+            }
+            for w in words
+        ]
+        tables = page.extract_tables()
+        return {
+            "page_width": round(page.width, 1),
+            "page_height": round(page.height, 1),
+            "num_words": len(out_words),
+            "num_lines": len(page.lines),
+            "num_rects": len(page.rects),
+            "num_tables": len(tables),
+            "table0_dims": [len(tables[0]), len(tables[0][0])] if tables and tables[0] else None,
+            "words": out_words,
+        }
+
+
 @app.post("/parse-pdf")
 async def parse_pdf(file: UploadFile = File(...)):
     filename = file.filename or ""
