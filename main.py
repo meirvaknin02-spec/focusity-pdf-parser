@@ -263,19 +263,26 @@ def _group_words_into_lines(words, page, x0, x1):
             lines.append(cur)
     out = []
     for ln in lines:
+        top, bottom = ln["top"], ln["bottom"]
+        raw = ""
         try:
-            strip = page.crop((x0, ln["top"] - 1, x1, ln["bottom"] + 1))
+            strip = page.crop((x0, top - 1, x1, bottom + 1))
+            # Keep only chars whose vertical CENTER falls on this line, so a
+            # neighbouring cell's text that merely overlaps the strip border
+            # (metadata sitting right on a cell boundary) is excluded instead
+            # of bleeding into this line's text.
+            strip = strip.filter(
+                lambda o: top - 1 <= (o.get("top", 0) + o.get("bottom", 0)) / 2 <= bottom + 1
+            )
             raw = strip.extract_text() or ""
         except Exception:
             raw = ""
-        # A thin strip should yield one visual line; if pdfminer still returns
-        # several, join them. Fall back to per-word joining if the crop is empty.
         if raw.strip():
             text = " ".join(fix_bidi_line(p) for p in raw.split("\n") if p.strip())
         else:
             ln["words"].sort(key=lambda w: -w["x0"])
             text = " ".join(fix_bidi_line(w["text"]) for w in ln["words"])
-        out.append({"top": ln["top"], "bottom": ln["bottom"], "text": text})
+        out.append({"top": top, "bottom": bottom, "text": text})
     return out
 
 
