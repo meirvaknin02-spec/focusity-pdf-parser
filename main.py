@@ -439,6 +439,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/version")
+def version():
+    # Deploy-verification marker: bump the string on every push so polling
+    # scripts can confirm the live instance actually picked up new code,
+    # instead of inferring it from parsing output (Render deploys on this
+    # project have been taking much longer than usual this session, and
+    # output-based inference produced false negatives).
+    return {"marker": "grid-parser-v6-charfilter"}
+
+
 @app.post("/debug-parse-class")
 async def debug_parse_class(file: UploadFile = File(...)):
     contents = await file.read()
