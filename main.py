@@ -399,7 +399,6 @@ def parse_class_schedule(page):
             "room": location,
             "course_code": course_code,
             "credits": credits if credits is not None else "",
-            "_bbox": (r["x0"], r["top"], r["x1"], r["bottom"]),
         })
 
     records.sort(key=lambda c: (c["day"], c["start_time"]))
@@ -409,73 +408,6 @@ def parse_class_schedule(page):
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-@app.get("/version")
-def version():
-    # Deploy-verification marker: bump the string on every push so polling
-    # scripts can confirm the live instance actually picked up new code,
-    # instead of inferring it from parsing output (Render deploys on this
-    # project have been taking much longer than usual this session, and
-    # output-based inference produced false negatives).
-    return {"marker": "grid-parser-v7-cellhalfopen"}
-
-
-@app.post("/debug-parse-class")
-async def debug_parse_class(file: UploadFile = File(...)):
-    contents = await file.read()
-    with pdfplumber.open(io.BytesIO(contents)) as pdf:
-        page = pdf.pages[0]
-        records = parse_class_schedule(page)
-        for rec in records or []:
-            x0, top, x1, bottom = rec["_bbox"]
-            crop = page.crop((x0, top, x1, bottom))
-            txt = crop.extract_text() or ""
-            rec["_crop_lines"] = [fix_bidi_line(ln) for ln in txt.split("\n") if ln.strip()]
-        return records
-
-
-# Temporary diagnostic endpoint for designing the weekly-grid parser -- returns
-# words with positions (bidi-fixed) plus table/line counts so the real grid
-# geometry can be inspected without a local Python interpreter.
-# TODO: remove once the class-schedule parser is validated.
-@app.post("/debug-class-schedule")
-async def debug_class_schedule(file: UploadFile = File(...)):
-    contents = await file.read()
-    with pdfplumber.open(io.BytesIO(contents)) as pdf:
-        page = pdf.pages[0]
-        words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
-        out_words = [
-            {
-                "t": fix_bidi_line(w["text"]),
-                "raw": w["text"],
-                "x0": round(w["x0"], 1),
-                "x1": round(w["x1"], 1),
-                "top": round(w["top"], 1),
-                "bottom": round(w["bottom"], 1),
-            }
-            for w in words
-        ]
-        rects = [
-            {"x0": round(r["x0"], 1), "x1": round(r["x1"], 1), "top": round(r["top"], 1),
-             "bottom": round(r["bottom"], 1), "w": round(r["width"], 1), "h": round(r["height"], 1)}
-            for r in page.rects
-        ]
-        # Horizontal lines only, with their x-span, for cell-boundary detection.
-        hlines = [
-            {"top": round(ln["top"], 1), "x0": round(ln["x0"], 1), "x1": round(ln["x1"], 1)}
-            for ln in page.lines if abs(ln["top"] - ln["bottom"]) < 1.0
-        ]
-        return {
-            "page_width": round(page.width, 1),
-            "page_height": round(page.height, 1),
-            "num_words": len(out_words),
-            "num_rects": len(rects),
-            "num_hlines": len(hlines),
-            "rects": rects,
-            "hlines": hlines,
-            "words": out_words,
-        }
 
 
 @app.post("/parse-pdf")
@@ -534,9 +466,6 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
         raise
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
-
-    for rec in records:
-        rec.pop("_bbox", None)
 
     if not records:
         raise HTTPException(
