@@ -524,3 +524,42 @@ async def parse_pdf(file: UploadFile = File(...)):
         )
 
     return records
+
+
+@app.post("/parse-class-schedule-pdf")
+async def parse_class_schedule_pdf(file: UploadFile = File(...)):
+    """Weekly class-schedule (מערכת שעות) grid PDF -> JSON matching the shape
+    the React frontend's hebrewScheduleParser.js already produces, so it
+    slots into the exact same review table without any shape translation:
+    course_name, day (0=Sunday..6=Saturday), start_time, end_time, lecturer,
+    room, course_code, credits."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf") and file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+
+    try:
+        with pdfplumber.open(io.BytesIO(contents)) as pdf:
+            records = []
+            for page in pdf.pages:
+                page_records = parse_class_schedule(page)
+                if page_records:
+                    records.extend(page_records)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
+
+    for rec in records:
+        rec.pop("_bbox", None)
+
+    if not records:
+        raise HTTPException(
+            status_code=422,
+            detail="לא זוהתה מערכת שעות בקובץ. ודא שהקובץ הוא מערכת שעות שבועית במבנה יומן (ימים בעמודות, שעות בשורות).",
+        )
+
+    return records
