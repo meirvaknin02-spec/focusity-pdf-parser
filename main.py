@@ -364,9 +364,6 @@ def parse_class_schedule(page):
             code_m = COURSE_CODE_RE.search(text)
             if code_m and not course_code:
                 course_code = code_m.group(1)
-                # a line that is only the code carries nothing else
-                if ROOM_NUM_RE.match(text.replace(course_code, "").strip() or "x"):
-                    pass
                 continue
             if METADATA_RE.search(text):
                 cm = re.search(r'נ["״]ז[:\s]*([0-9]+)', text)
