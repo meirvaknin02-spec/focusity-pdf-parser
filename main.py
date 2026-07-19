@@ -243,47 +243,28 @@ def _median(nums):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def _group_words_into_lines(words, page, x0, x1):
-    """Cluster words (each {text,x0,x1,top,bottom}) sharing a baseline into
-    visual lines, ordered top-to-bottom. Each line's text is read by cropping
-    that line's thin horizontal strip and running pdfminer's own layout
-    extraction -- this reconstructs multi-word Hebrew far more reliably than
-    joining pdfplumber's per-word tokens (whose RTL segmentation garbles
-    lines that mix Hebrew with parentheses/Latin), while the strip's tight
-    height avoids the vertical bleed a full-cell crop suffers at borders."""
-    ws = sorted(words, key=lambda w: (w["top"], -w["x0"]))
-    lines = []
-    cur = None
-    for w in ws:
-        if cur is not None and abs(w["top"] - cur["top"]) <= 3:
-            cur["words"].append(w)
-            cur["bottom"] = max(cur["bottom"], w["bottom"])
-        else:
-            cur = {"top": w["top"], "bottom": w["bottom"], "words": [w]}
-            lines.append(cur)
-    out = []
-    for ln in lines:
-        top, bottom = ln["top"], ln["bottom"]
+def _cell_lines(page, rect):
+    """Read a class cell's text as clean visual lines. Some classes in a real
+    schedule sit flush against their neighbour (zero gap between rect
+    boundaries -- confirmed against a real Sapir College export), so this
+    filters page.chars to EXACTLY the cell's own rect using a half-open
+    interval on each char's center point ([top, bottom), [x0, x1)): every
+    char belongs to exactly one cell by construction, with no shared-border
+    double-membership the way a padded crop has. pdfminer's own layout
+    extraction on that exact char set then reconstructs multi-word Hebrew
+    lines far more reliably than joining pdfplumber's per-word tokens."""
+    top, bottom, x0, x1 = rect["top"], rect["bottom"], rect["x0"], rect["x1"]
+
+    def in_cell(obj):
+        cy = (obj.get("top", 0) + obj.get("bottom", 0)) / 2
+        cx = (obj.get("x0", 0) + obj.get("x1", 0)) / 2
+        return top <= cy < bottom and x0 <= cx < x1
+
+    try:
+        raw = page.filter(in_cell).extract_text() or ""
+    except Exception:
         raw = ""
-        try:
-            strip = page.crop((x0, top - 1, x1, bottom + 1))
-            # Keep only chars whose vertical CENTER falls on this line, so a
-            # neighbouring cell's text that merely overlaps the strip border
-            # (metadata sitting right on a cell boundary) is excluded instead
-            # of bleeding into this line's text.
-            strip = strip.filter(
-                lambda o: top - 1 <= (o.get("top", 0) + o.get("bottom", 0)) / 2 <= bottom + 1
-            )
-            raw = strip.extract_text() or ""
-        except Exception:
-            raw = ""
-        if raw.strip():
-            text = " ".join(fix_bidi_line(p) for p in raw.split("\n") if p.strip())
-        else:
-            ln["words"].sort(key=lambda w: -w["x0"])
-            text = " ".join(fix_bidi_line(w["text"]) for w in ln["words"])
-        out.append({"top": top, "bottom": bottom, "text": text})
-    return out
+    return [fix_bidi_line(ln.strip()) for ln in raw.split("\n") if ln.strip()]
 
 
 def parse_class_schedule(page):
@@ -359,17 +340,12 @@ def parse_class_schedule(page):
     if not class_rects:
         return None
 
-    # 4. For each class cell, collect the words inside and classify its lines.
+    # 4. For each class cell, read its own lines and classify them.
     records = []
     for r, day in class_rects:
-        inside = [
-            w for w in words
-            if r["top"] - 1 <= (w["top"] + w["bottom"]) / 2 <= r["bottom"] + 1
-            and r["x0"] - 1 <= (w["x0"] + w["x1"]) / 2 <= r["x1"] + 1
-        ]
-        if not inside:
+        lines = _cell_lines(page, r)
+        if not lines:
             continue
-        lines = _group_words_into_lines(inside, page, r["x0"], r["x1"])
 
         start_time = snap_time(r["top"])
         end_time = snap_time(r["bottom"])
@@ -382,8 +358,7 @@ def parse_class_schedule(page):
         name_lines = []
         seen_lecturer = False
 
-        for ln in lines:
-            text = ln["text"].strip()
+        for text in lines:
             if not text:
                 continue
             code_m = COURSE_CODE_RE.search(text)
