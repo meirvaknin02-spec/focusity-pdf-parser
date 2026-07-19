@@ -421,7 +421,7 @@ def version():
     # instead of inferring it from parsing output (Render deploys on this
     # project have been taking much longer than usual this session, and
     # output-based inference produced false negatives).
-    return {"marker": "grid-parser-v6-charfilter"}
+    return {"marker": "grid-parser-v7-cellhalfopen"}
 
 
 @app.post("/debug-parse-class")
