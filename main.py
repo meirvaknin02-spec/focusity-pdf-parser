@@ -224,6 +224,120 @@ def parse_table(table) -> list:
     return records
 
 
+# Grade-sheet (transcript) parsing -- separate field-keyword map from the
+# exam-schedule one above since a grade sheet's columns (course/grade/
+# credits) don't overlap with a schedule's (course/date/time/room).
+# match_grade_field checks FIELDS in this dict's order and a field's keyword
+# match is a plain substring test -- so exam_grade (specific phrases like
+# "ציון מבחן") MUST be listed before grade (whose fallback bare "ציון" is
+# itself a substring of "ציון מבחן"), or the generic "grade" field would
+# steal the exam-grade column before exam_grade's own keywords are ever
+# tried. course_name is checked first regardless since its keywords don't
+# overlap with either grade field's.
+GRADE_FIELD_KEYWORDS = {
+    "course_name": ["שם הקורס", "שם קורס", "שם השיעור", "שם שיעור", "מקצוע", "קורס"],
+    "exam_grade": ["ציון מבחן", "ציון בחינה", "ציון בכתב"],
+    # "ציון סופי" (final grade) -- listed before the bare "ציון" fallback for
+    # the same substring reason as above, applied within this field's own list.
+    "grade": ["ציון סופי", "ציון כולל", "ציון"],
+    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "זיכוי", "זכות"],
+    "label": ["סמסטר", "תקופה", "מועד", "שנת לימודים"],
+}
+
+GRADE_RE = re.compile(r"^(\d{1,3}(?:\.\d+)?)$")
+
+
+def match_grade_field(header_cell: str) -> Optional[str]:
+    if not header_cell:
+        return None
+    for field, keywords in GRADE_FIELD_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in header_cell:
+                return field
+    return None
+
+
+def detect_grade_header_row(table):
+    """Same approach as detect_header_row (bidi-reversal detected per-table,
+    best-scoring row within the first few), against GRADE_FIELD_KEYWORDS."""
+    best_idx, best_score, best_reverse = -1, 0, False
+    for idx, row in enumerate(table[:5]):
+        for reverse in (False, True):
+            score = sum(1 for cell in row if match_grade_field(normalize_cell(cell, reverse)))
+            if score > best_score:
+                best_idx, best_score, best_reverse = idx, score, reverse
+    if best_score < MIN_HEADER_KEYWORD_HITS:
+        return -1, False
+    return best_idx, best_reverse
+
+
+def map_grade_columns(header_row, reverse: bool) -> dict:
+    mapping = {}
+    for idx, raw_cell in enumerate(header_row):
+        field = match_grade_field(normalize_cell(raw_cell, reverse))
+        if field and field not in mapping:
+            mapping[field] = idx
+    return mapping
+
+
+def normalize_grade(raw: str) -> Optional[float]:
+    """Grades are 0-100 -- reject anything outside that range rather than
+    silently accepting a stray credits/year number from a misaligned column."""
+    if not raw:
+        return None
+    s = raw.strip().replace(",", ".")
+    match = GRADE_RE.match(s)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if 0 <= value <= 100 else None
+
+
+def parse_grade_table(table) -> list:
+    if not table:
+        return []
+    header_idx, reverse = detect_grade_header_row(table)
+    if header_idx == -1:
+        return []
+    mapping = map_grade_columns(table[header_idx], reverse)
+    if "course_name" not in mapping or "grade" not in mapping:
+        return []
+
+    def cell(row, field):
+        idx = mapping.get(field)
+        if idx is None or idx >= len(row):
+            return ""
+        return normalize_cell(row[idx], reverse)
+
+    records = []
+    for row in table[header_idx + 1:]:
+        if row is None or all(not normalize_cell(c) for c in row):
+            continue
+
+        course_name = cell(row, "course_name")
+        grade = normalize_grade(cell(row, "grade"))
+        if not course_name or grade is None:
+            continue
+
+        record = {"course_name": course_name, "grade": grade}
+        exam_grade = normalize_grade(cell(row, "exam_grade"))
+        if exam_grade is not None:
+            record["exam_grade"] = exam_grade
+        credits_raw = cell(row, "credits")
+        if credits_raw:
+            try:
+                record["credits"] = float(credits_raw.replace(",", "."))
+            except ValueError:
+                pass
+        label = cell(row, "label")
+        if label:
+            record["label"] = label
+
+        records.append(record)
+
+    return records
+
+
 DAY_NAME_TO_IDX = {
     "ראשון": 0, "שני": 1, "שלישי": 2, "רביעי": 3, "חמישי": 4, "שישי": 5, "שבת": 6,
 }
@@ -435,6 +549,40 @@ async def parse_pdf(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=422,
             detail="לא זוהתה טבלת בחינות בקובץ. ודא שהקובץ מכיל טבלה עם כותרות בעברית (למשל: קורס, תאריך, שעה).",
+        )
+
+    return records
+
+
+@app.post("/parse-grade-sheet")
+async def parse_grade_sheet(file: UploadFile = File(...)):
+    """Grade sheet / transcript PDF -> JSON rows: course_name, grade (final,
+    authoritative), and optional exam_grade/credits/label -- same shape the
+    frontend's gradeSheetParser.js already produces from CSV/Excel, so it
+    slots into the same review table without any shape translation."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf") and file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+
+    try:
+        with pdfplumber.open(io.BytesIO(contents)) as pdf:
+            records = []
+            for page in pdf.pages:
+                for table in page.extract_tables():
+                    records.extend(parse_grade_table(table))
+    except HTTPException:
+        raise
+    except Exception as exc:  # pdfplumber/pdfminer can raise many exception types on malformed PDFs
+        raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
+
+    if not records:
+        raise HTTPException(
+            status_code=422,
+            detail="לא זוהה גליון ציונים בקובץ. ודא שהקובץ מכיל טבלה עם כותרות בעברית (למשל: שם קורס, ציון סופי).",
         )
 
     return records
