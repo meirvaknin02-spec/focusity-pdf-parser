@@ -38,8 +38,11 @@ FIELD_KEYWORDS = {
     # "שם שיעור" (SCE college's own header wording, confirmed against a real
     # exam-schedule PDF) must stay a full two-word phrase, not a bare
     # "שיעור" -- that would also match "קוד שיעור" (the course-code column)
-    # since match_field does substring matching per header cell.
-    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "מקצוע", "קורס"],
+    # since match_field does substring matching per header cell. "שם שעור"
+    # (no yud) is a second, distinct SCE spelling confirmed against a real
+    # grade-sheet PDF from the same college -- both variants are kept since
+    # different SCE exports use different ones.
+    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "שם שעור", "מקצוע", "קורס"],
     "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך"],
     "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום"],
     "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה"],
@@ -235,7 +238,13 @@ def parse_table(table) -> list:
 # tried. course_name is checked first regardless since its keywords don't
 # overlap with either grade field's.
 GRADE_FIELD_KEYWORDS = {
-    "course_name": ["שם הקורס", "שם קורס", "שם השיעור", "שם שיעור", "מקצוע", "קורס"],
+    # "שם שעור" (no yud) is SCE college's own spelling on its grade-sheet
+    # (transcript) export -- distinct from the "שם שיעור" spelling used on
+    # SCE's exam-schedule export (see FIELD_KEYWORDS above). Confirmed
+    # against a real SCE transcript PDF where this was the only column-header
+    # variant present, so without it course_name never matched and the whole
+    # sheet was rejected as "no grade table found".
+    "course_name": ["שם הקורס", "שם קורס", "שם השיעור", "שם שיעור", "שם שעור", "מקצוע", "קורס"],
     "exam_grade": ["ציון מבחן", "ציון בחינה", "ציון בכתב"],
     # "ציון סופי" (final grade) -- listed before the bare "ציון" fallback for
     # the same substring reason as above, applied within this field's own list.
