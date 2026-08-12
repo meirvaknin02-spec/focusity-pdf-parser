@@ -5,15 +5,28 @@ a university PDF using pdfplumber, matches Hebrew header keywords to find
 which column is which regardless of the exporting institution's exact
 wording/column order, and returns clean JSON rows.
 """
+import asyncio
 import io
+import logging
 import os
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 import pdfplumber
+
+# Previously there was no logging at all: a parse failure's real cause (a
+# corrupt PDF, an unexpected pdfminer exception, ...) was visible ONLY by
+# echoing the raw exception text back to the client -- which also meant an
+# internal detail (a Python exception message, occasionally including a
+# library-internal path or type name) was exposed in the HTTP response
+# instead of staying server-side. Uvicorn's default logging config already
+# ships everything through to stdout/stderr, so this needs no extra setup
+# to show up wherever the service's logs are viewed (locally or on Render).
+logger = logging.getLogger("focusity_pdf_parser")
 
 app = FastAPI(title="Focusity PDF Schedule Parser")
 
@@ -33,8 +46,17 @@ app.add_middleware(
 # phrases are listed before generic ones: header cells are matched in
 # keyword-list order, so "עד שעה" must be tried as an end_time candidate
 # before the bare "שעה" keyword (which also appears inside it) can claim it
-# for start_time instead.
+# for start_time instead. The same ordering sensitivity applies ACROSS
+# fields too, since match_field checks FIELDS in this dict's own order and
+# returns on the first substring hit -- see course_code below.
 FIELD_KEYWORDS = {
+    # Must come before course_name: course_name's own generic "קורס"
+    # fallback is a substring of "קוד קורס"/"מספר קורס", so if course_name
+    # were checked first it would claim the course-code column for itself
+    # and course_code's specific keywords would never get a chance to match
+    # -- confirmed live (course_code was silently never extracted for any
+    # real PDF with a "קוד קורס" column) before this field was moved here.
+    "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד"],
     # "שם שיעור" (SCE college's own header wording, confirmed against a real
     # exam-schedule PDF) must stay a full two-word phrase, not a bare
     # "שיעור" -- that would also match "קוד שיעור" (the course-code column)
@@ -48,7 +70,6 @@ FIELD_KEYWORDS = {
     "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה"],
     "room": ["חדר", "אולם", "מיקום", "בניין"],
     "moed": ["מועד"],
-    "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד"],
 }
 
 DATE_RE = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})")
@@ -58,6 +79,30 @@ HEBREW_LETTER_RE = re.compile("[֐-׿]")
 RUN_RE = re.compile(r"\d+|\D+")
 
 MIN_HEADER_KEYWORD_HITS = 2
+
+# Real exam-schedule/grade-sheet/class-schedule exports are simple
+# text-based PDFs, typically well under 1MB. 20MB is a generous ceiling that
+# rejects abusive/oversized uploads before they reach pdfplumber (the
+# expensive parsing step) without affecting any legitimate file.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# Real PDFs start with this signature (some generators emit a few bytes of
+# leading noise/BOM before it, which is why real PDF readers -- and this
+# check -- tolerate it anywhere in the first 1024 bytes rather than
+# requiring it at byte 0). The filename/Content-Type each endpoint also
+# checks are both entirely client-controlled and trivially spoofed (e.g.
+# renaming any file to *.pdf); this looks at the actual bytes instead.
+PDF_MAGIC = b"%PDF-"
+PDF_MAGIC_SEARCH_WINDOW = 1024
+
+
+def validate_pdf_contents(contents: bytes) -> None:
+    if not contents:
+        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+    if PDF_MAGIC not in contents[:PDF_MAGIC_SEARCH_WINDOW]:
+        raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF תקין.")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="הקובץ גדול מדי (מקסימום 20MB).")
 
 
 def fix_bidi_line(line: str) -> str:
@@ -528,6 +573,53 @@ def parse_class_schedule(page):
     return records
 
 
+# Generous enough for a real multi-page schedule/transcript, but bounded so
+# one adversarial or pathologically slow PDF can't hang a request forever.
+PARSE_TIMEOUT_SECONDS = 30
+
+
+def _extract_records_sync(contents: bytes, page_records: Callable) -> list:
+    """The actual pdfplumber work -- synchronous and CPU/IO-bound, so this
+    must never be awaited directly in an endpoint (see the run_in_threadpool
+    calls below). Previously it ran straight in the event loop, meaning a
+    single slow/malicious PDF blocked ALL requests this process was
+    handling, not just its own -- with the render.yaml deploy's single
+    worker, that meant one bad upload could stall the entire service.
+    Offloading to a thread pool means other requests keep being served
+    while this one runs; wrapping the caller in asyncio.wait_for (below)
+    additionally bounds how long a client waits before getting a clean
+    error instead of hanging indefinitely. Note this bounds the CLIENT's
+    wait, not the underlying thread itself -- Python can't forcibly kill a
+    running thread, so a genuinely pathological file still finishes
+    consuming its thread-pool slot in the background after the timeout
+    fires; a full fix would need a subprocess-based sandbox, which is a
+    much larger architectural change than this warrants."""
+    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+        records = []
+        for page in pdf.pages:
+            records.extend(page_records(page))
+        return records
+
+
+async def _parse_with_timeout(contents: bytes, page_records: Callable) -> list:
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(_extract_records_sync, contents, page_records),
+            timeout=PARSE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("PDF parsing timed out after %s seconds", PARSE_TIMEOUT_SECONDS)
+        raise HTTPException(
+            status_code=504,
+            detail="ניתוח הקובץ ארך זמן רב מדי. נסה קובץ קטן או פשוט יותר.",
+        )
+    except HTTPException:
+        raise
+    except Exception:  # pdfplumber/pdfminer can raise many exception types on malformed PDFs
+        logger.exception("PDF parsing failed")
+        raise HTTPException(status_code=422, detail="קריאת ה-PDF נכשלה. ודא שזהו קובץ PDF תקין ונסה שוב.")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -540,19 +632,12 @@ async def parse_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
 
     contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+    validate_pdf_contents(contents)
 
-    try:
-        with pdfplumber.open(io.BytesIO(contents)) as pdf:
-            records = []
-            for page in pdf.pages:
-                for table in page.extract_tables():
-                    records.extend(parse_table(table))
-    except HTTPException:
-        raise
-    except Exception as exc:  # pdfplumber/pdfminer can raise many exception types on malformed PDFs
-        raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
+    def page_records(page):
+        return [r for table in page.extract_tables() for r in parse_table(table)]
+
+    records = await _parse_with_timeout(contents, page_records)
 
     if not records:
         raise HTTPException(
@@ -574,19 +659,12 @@ async def parse_grade_sheet(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
 
     contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+    validate_pdf_contents(contents)
 
-    try:
-        with pdfplumber.open(io.BytesIO(contents)) as pdf:
-            records = []
-            for page in pdf.pages:
-                for table in page.extract_tables():
-                    records.extend(parse_grade_table(table))
-    except HTTPException:
-        raise
-    except Exception as exc:  # pdfplumber/pdfminer can raise many exception types on malformed PDFs
-        raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
+    def page_records(page):
+        return [r for table in page.extract_tables() for r in parse_grade_table(table)]
+
+    records = await _parse_with_timeout(contents, page_records)
 
     if not records:
         raise HTTPException(
@@ -609,20 +687,15 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
 
     contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="הקובץ ריק.")
+    validate_pdf_contents(contents)
 
-    try:
-        with pdfplumber.open(io.BytesIO(contents)) as pdf:
-            records = []
-            for page in pdf.pages:
-                page_records = parse_class_schedule(page)
-                if page_records:
-                    records.extend(page_records)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"קריאת ה-PDF נכשלה: {exc}")
+    def page_records(page):
+        # parse_class_schedule returns None (not []) for a page that isn't a
+        # recognizable grid schedule -- normalized here since the shared
+        # helper always does records.extend(page_records(page)).
+        return parse_class_schedule(page) or []
+
+    records = await _parse_with_timeout(contents, page_records)
 
     if not records:
         raise HTTPException(
