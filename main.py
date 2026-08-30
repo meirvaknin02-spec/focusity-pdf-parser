@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -251,6 +251,13 @@ def parse_table(table) -> list:
             if range_start:
                 start_time, end_time = range_start, range_end
 
+        # RTL extraction can flip the visual order of a time pair (the
+        # digits themselves survive bidi intact but the two times swap
+        # places). Exams never span midnight, so start > end is always the
+        # flipped case, never a real range.
+        if start_time and end_time and start_time > end_time:
+            start_time, end_time = end_time, start_time
+
         record = {
             "course_name": course_name,
             "date": date_iso,
@@ -267,6 +274,114 @@ def parse_table(table) -> list:
         if course_code:
             record["course_code"] = course_code
 
+        records.append(record)
+
+    return records
+
+
+# --- Free-text-line fallback for exam schedules ---
+# Last-resort layer for exam-schedule PDFs where no table can be recovered
+# at all (no ruling lines AND column alignment too irregular for the
+# text-strategy pass): treat each text line carrying a date + a time as a
+# candidate exam row. Fuzzier than column mapping by design -- the frontend
+# shows every parsed row in a review table before anything is imported, so
+# an occasional stray row is visible and deletable there, whereas the
+# previous behavior (hard 422, zero rows) left the user with nothing.
+
+# Lines that carry a date+time but are document chrome, not exam rows
+# (print footers, "data current as of" stamps, page numbers).
+METADATA_LINE_RE = re.compile(r"הדפסה|הודפס|עמוד\s*\d|נכון ל")
+MOED_TOKEN_RE = re.compile(r"מועד\s*ה?בחינה|מועד\s*([אבג])['׳]?")
+# Standalone digit/punctuation tokens left over after stripping date+times
+# (course codes, room numbers, row indices) -- not part of the course name.
+NUMERIC_TOKEN_RE = re.compile(r"^[\d\-./:()]+$")
+COURSE_CODE_TOKEN_RE = re.compile(r"^\d{5,8}$")
+
+# Words common in real Israeli schedule/transcript exports, used to decide
+# whether a page's extracted text needs the bidi fix (see fix_bidi_line):
+# whichever orientation contains more of these words is the readable one.
+# Header-keyword scoring can't be reused here because this fallback runs
+# exactly when no header row was found.
+_COMMON_HEBREW_WORDS = ("מועד", "בחינה", "מבחן", "קורס", "סמסטר", "תאריך", "שעה", "חדר")
+
+
+def _page_needs_reverse(text: str) -> bool:
+    fixed = "\n".join(fix_bidi_line(line) for line in text.split("\n"))
+    raw_score = sum(text.count(w) for w in _COMMON_HEBREW_WORDS)
+    fixed_score = sum(fixed.count(w) for w in _COMMON_HEBREW_WORDS)
+    return fixed_score > raw_score
+
+
+def parse_exam_text_lines(page) -> list:
+    text = page.extract_text() or ""
+    if not text.strip():
+        return []
+    needs_reverse = _page_needs_reverse(text)
+
+    records = []
+    for raw_line in text.split("\n"):
+        line = fix_bidi_line(raw_line) if needs_reverse else raw_line
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line or METADATA_LINE_RE.search(line):
+            continue
+
+        date_iso = normalize_date(line)
+        if not date_iso:
+            continue
+        # Requiring a time as well filters out most non-exam dated lines
+        # (semester headers, signature dates) at the cost of dropping the
+        # rare schedule that omits times -- the safer trade for a fallback.
+        times = sorted({f"{int(h):02d}:{int(m):02d}" for h, m in TIME_RE.findall(line)
+                        if int(h) <= 23 and int(m) <= 59})
+        if not times:
+            continue
+
+        remainder = DATE_RE.sub(" ", line)
+        remainder = TIME_RE.sub(" ", remainder)
+
+        moed = None
+        moed_match = MOED_TOKEN_RE.search(remainder)
+        if moed_match:
+            moed = ("מועד " + moed_match.group(1)) if moed_match.group(1) else None
+            remainder = MOED_TOKEN_RE.sub(" ", remainder)
+
+        course_code = None
+        name_tokens = []
+        prev_was_name = False
+        for token in remainder.split():
+            if COURSE_CODE_TOKEN_RE.match(token):
+                if course_code is None:
+                    course_code = token
+                prev_was_name = False
+                continue
+            if NUMERIC_TOKEN_RE.match(token):
+                # A lone digit right after a name word is part of the name
+                # ("פיזיקה 1", "אלגברה 2") -- longer numeric runs, and digits
+                # not adjacent to a name word (row indices, room numbers),
+                # are not.
+                if prev_was_name and len(token) == 1 and token.isdigit():
+                    name_tokens.append(token)
+                prev_was_name = False
+                continue
+            name_tokens.append(token)
+            prev_was_name = True
+        course_name = " ".join(name_tokens).strip(" -.,:;|")
+
+        # A real course name has a few Hebrew letters; anything shorter is
+        # residue (a stray moed letter, a building abbreviation).
+        if len(HEBREW_LETTER_RE.findall(course_name)) < 3:
+            continue
+
+        record = {
+            "course_name": course_name,
+            "date": date_iso,
+            "start_time": times[0],
+            "end_time": times[1] if len(times) > 1 else None,
+        }
+        if moed:
+            record["moed"] = moed
+        if course_code:
+            record["course_code"] = course_code
         records.append(record)
 
     return records
@@ -577,8 +692,25 @@ def parse_class_schedule(page):
 # one adversarial or pathologically slow PDF can't hang a request forever.
 PARSE_TIMEOUT_SECONDS = 30
 
+# A digital exam-schedule/transcript export always carries at least a few
+# dozen extractable characters (headers alone exceed this). Below it, the
+# document is a scan/photo (image-only pages) -- text extraction is
+# structurally impossible, and the user needs to be told THAT rather than
+# the generic "no table recognized" (which reads as "try a different
+# table"), because no re-upload of the same scan can ever succeed.
+MIN_EXTRACTABLE_TEXT_CHARS = 20
 
-def _extract_records_sync(contents: bytes, page_records: Callable) -> list:
+# Tried on tables when the default (ruling-lines-based) pass finds nothing:
+# many institutions export schedules as visually aligned text columns with
+# no drawn cell borders, which the default strategy cannot see at all.
+# Word-alignment-based detection is noisier, but every candidate table it
+# yields still has to pass the header-keyword gate (MIN_HEADER_KEYWORD_HITS
+# + required-column checks), so a garbage grid is rejected the same way any
+# non-schedule table is.
+TEXT_TABLE_SETTINGS = {"vertical_strategy": "text", "horizontal_strategy": "text"}
+
+
+def _extract_records_sync(contents: bytes, strategies: list) -> list:
     """The actual pdfplumber work -- synchronous and CPU/IO-bound, so this
     must never be awaited directly in an endpoint (see the run_in_threadpool
     calls below). Previously it ran straight in the event loop, meaning a
@@ -593,18 +725,39 @@ def _extract_records_sync(contents: bytes, page_records: Callable) -> list:
     running thread, so a genuinely pathological file still finishes
     consuming its thread-pool slot in the background after the timeout
     fires; a full fix would need a subprocess-based sandbox, which is a
-    much larger architectural change than this warrants."""
+    much larger architectural change than this warrants.
+
+    `strategies` is an ordered list of per-page extractors, best-quality
+    first. The first strategy that yields ANY records for the document wins
+    outright -- later (fuzzier) strategies are fallbacks for documents the
+    precise ones can't read at all, not supplements, since the same rows
+    would otherwise be extracted twice by two different strategies. If every
+    strategy comes up empty on a document with no extractable text, the
+    document is a scan -- reported as its own distinct error (see
+    MIN_EXTRACTABLE_TEXT_CHARS)."""
     with pdfplumber.open(io.BytesIO(contents)) as pdf:
-        records = []
-        for page in pdf.pages:
-            records.extend(page_records(page))
-        return records
+        for page_records in strategies:
+            records = []
+            for page in pdf.pages:
+                records.extend(page_records(page))
+            if records:
+                return records
+        total_text = "".join((page.extract_text() or "") for page in pdf.pages)
+        if len(total_text.strip()) < MIN_EXTRACTABLE_TEXT_CHARS:
+            logger.warning("PDF appears to be a scan: no extractable text")
+            raise HTTPException(
+                status_code=422,
+                detail="הקובץ סרוק כתמונה ולא ניתן לקרוא ממנו טקסט. נסה להוריד גרסה דיגיטלית של הקובץ מאתר המוסד במקום סריקה או צילום.",
+            )
+        return []
 
 
-async def _parse_with_timeout(contents: bytes, page_records: Callable) -> list:
+async def _parse_with_timeout(contents: bytes, strategies) -> list:
+    if callable(strategies):
+        strategies = [strategies]
     try:
         return await asyncio.wait_for(
-            run_in_threadpool(_extract_records_sync, contents, page_records),
+            run_in_threadpool(_extract_records_sync, contents, strategies),
             timeout=PARSE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -634,10 +787,16 @@ async def parse_pdf(file: UploadFile = File(...)):
     contents = await file.read()
     validate_pdf_contents(contents)
 
-    def page_records(page):
-        return [r for table in page.extract_tables() for r in parse_table(table)]
+    # Best-quality first: bordered tables, then borderless (text-aligned)
+    # tables, then raw text lines. See _extract_records_sync for why only
+    # the first non-empty layer's records are used.
+    strategies = [
+        lambda page: [r for table in page.extract_tables() for r in parse_table(table)],
+        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS) for r in parse_table(table)],
+        parse_exam_text_lines,
+    ]
 
-    records = await _parse_with_timeout(contents, page_records)
+    records = await _parse_with_timeout(contents, strategies)
 
     if not records:
         raise HTTPException(
@@ -661,10 +820,16 @@ async def parse_grade_sheet(file: UploadFile = File(...)):
     contents = await file.read()
     validate_pdf_contents(contents)
 
-    def page_records(page):
-        return [r for table in page.extract_tables() for r in parse_grade_table(table)]
+    # No free-text fallback here: a grade line is just a name plus bare
+    # numbers, and guessing which number is the grade vs credits vs course
+    # code without a header column is exactly the kind of wrong-but-
+    # plausible data that shouldn't reach a student's transcript.
+    strategies = [
+        lambda page: [r for table in page.extract_tables() for r in parse_grade_table(table)],
+        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS) for r in parse_grade_table(table)],
+    ]
 
-    records = await _parse_with_timeout(contents, page_records)
+    records = await _parse_with_timeout(contents, strategies)
 
     if not records:
         raise HTTPException(
