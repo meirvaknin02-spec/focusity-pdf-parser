@@ -42,21 +42,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Hebrew header keyword -> canonical field. Within a field, more specific
-# phrases are listed before generic ones: header cells are matched in
-# keyword-list order, so "עד שעה" must be tried as an end_time candidate
-# before the bare "שעה" keyword (which also appears inside it) can claim it
-# for start_time instead. The same ordering sensitivity applies ACROSS
-# fields too, since match_field checks FIELDS in this dict's own order and
-# returns on the first substring hit -- see course_code below.
+# Header keyword -> canonical field, Hebrew and English. Within a field,
+# more specific phrases are listed before generic ones: header cells are
+# matched in keyword-list order, so "עד שעה" must be tried as an end_time
+# candidate before the bare "שעה" keyword (which also appears inside it) can
+# claim it for start_time instead. The same ordering sensitivity applies
+# ACROSS fields too, since match_field checks FIELDS in this dict's own
+# order and returns on the first substring hit -- see course_code below.
+# English keywords are lowercase; match_field lowercases the header cell
+# (Hebrew has no case, so this only affects Latin text). Very short English
+# words that hide inside longer common headers ("to" in "instructor", "end"
+# in "attendance") are deliberately NOT keywords.
 FIELD_KEYWORDS = {
     # Must come before course_name: course_name's own generic "קורס"
-    # fallback is a substring of "קוד קורס"/"מספר קורס", so if course_name
-    # were checked first it would claim the course-code column for itself
-    # and course_code's specific keywords would never get a chance to match
-    # -- confirmed live (course_code was silently never extracted for any
-    # real PDF with a "קוד קורס" column) before this field was moved here.
-    "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד"],
+    # fallback is a substring of "קוד קורס"/"מספר קורס" (and "course" of
+    # "course code"), so if course_name were checked first it would claim
+    # the course-code column for itself and course_code's specific keywords
+    # would never get a chance to match -- confirmed live (course_code was
+    # silently never extracted for any real PDF with a "קוד קורס" column)
+    # before this field was moved here.
+    "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
     # "שם שיעור" (SCE college's own header wording, confirmed against a real
     # exam-schedule PDF) must stay a full two-word phrase, not a bare
     # "שיעור" -- that would also match "קוד שיעור" (the course-code column)
@@ -64,12 +69,15 @@ FIELD_KEYWORDS = {
     # (no yud) is a second, distinct SCE spelling confirmed against a real
     # grade-sheet PDF from the same college -- both variants are kept since
     # different SCE exports use different ones.
-    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "שם שעור", "מקצוע", "קורס"],
-    "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך"],
-    "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום"],
-    "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה"],
-    "room": ["חדר", "אולם", "מיקום", "בניין"],
-    "moed": ["מועד"],
+    "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "שם שעור", "מקצוע", "קורס",
+                    "course name", "course title", "subject", "course"],
+    "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך", "exam date", "date"],
+    # end_time before start_time: "time" (start_time's generic fallback) is
+    # a substring of "end time", the same trap as שעה inside "עד שעה".
+    "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום", "end time", "until", "finish"],
+    "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה", "start time", "start", "from", "time", "hour"],
+    "room": ["חדר", "אולם", "מיקום", "בניין", "room", "hall", "location", "building", "classroom"],
+    "moed": ["מועד", "moed"],
 }
 
 DATE_RE = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})")
@@ -138,17 +146,39 @@ def normalize_cell(cell, reverse: bool = False) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+MONTH_NAMES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# "1 Feb 2026" / "Feb 1, 2026" -- English exports write dates as text, not
+# only as DD/MM/YYYY. Only the first three letters of the month matter, so
+# both "Feb" and "February" match.
+TEXT_DATE_DMY_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})")
+TEXT_DATE_MDY_RE = re.compile(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})")
+
+
 def normalize_date(raw: str) -> Optional[str]:
-    """DD/MM/YYYY (or . / - separated, 2- or 4-digit year) -> ISO yyyy-mm-dd."""
+    """DD/MM/YYYY (or . / - separated, 2- or 4-digit year), '1 Feb 2026' or
+    'Feb 1, 2026' -> ISO yyyy-mm-dd."""
+    day = month = year_num = None
     match = DATE_RE.search(raw)
-    if not match:
+    if match:
+        day, month, year = match.groups()
+        day, month, year_num = int(day), int(month), int(year)
+        if year_num < 100:
+            year_num += 2000
+    else:
+        m = TEXT_DATE_DMY_RE.search(raw)
+        if m and m.group(2)[:3].lower() in MONTH_NAMES:
+            day, month, year_num = int(m.group(1)), MONTH_NAMES[m.group(2)[:3].lower()], int(m.group(3))
+        else:
+            m = TEXT_DATE_MDY_RE.search(raw)
+            if m and m.group(1)[:3].lower() in MONTH_NAMES:
+                day, month, year_num = int(m.group(2)), MONTH_NAMES[m.group(1)[:3].lower()], int(m.group(3))
+    if day is None:
         return None
-    day, month, year = match.groups()
-    year_num = int(year)
-    if year_num < 100:
-        year_num += 2000
     try:
-        return datetime(year_num, int(month), int(day)).date().isoformat()
+        return datetime(year_num, month, day).date().isoformat()
     except ValueError:
         return None
 
@@ -174,9 +204,10 @@ def extract_time_range(raw: str):
 def match_field(header_cell: str) -> Optional[str]:
     if not header_cell:
         return None
+    lowered = header_cell.lower()
     for field, keywords in FIELD_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in header_cell:
+            if keyword in lowered:
                 return field
     return None
 
@@ -290,7 +321,11 @@ def parse_table(table) -> list:
 
 # Lines that carry a date+time but are document chrome, not exam rows
 # (print footers, "data current as of" stamps, page numbers).
-METADATA_LINE_RE = re.compile(r"הדפסה|הודפס|עמוד\s*\d|נכון ל")
+METADATA_LINE_RE = re.compile(r"הדפסה|הודפס|עמוד\s*\d|נכון ל|(?i:printed|page\s*\d|as of|generated)")
+
+# A course name is real when it has a few letters in either alphabet --
+# the fallback must not require Hebrew, or English schedules never parse.
+NAME_LETTER_RE = re.compile(r"[A-Za-z֐-׿]")
 MOED_TOKEN_RE = re.compile(r"מועד\s*ה?בחינה|מועד\s*([אבג])['׳]?")
 # Standalone digit/punctuation tokens left over after stripping date+times
 # (course codes, room numbers, row indices) -- not part of the course name.
@@ -336,7 +371,17 @@ def parse_exam_text_lines(page) -> list:
         if not times:
             continue
 
-        remainder = DATE_RE.sub(" ", line)
+        # Strip whichever date form actually matched. Text-date stripping
+        # runs ONLY when no numeric date exists and ONLY on real month names,
+        # because its pattern ("word digits year-like-number") would
+        # otherwise eat legitimate name text such as "Physics 2 1234".
+        if DATE_RE.search(line):
+            remainder = DATE_RE.sub(" ", line)
+        else:
+            remainder = TEXT_DATE_DMY_RE.sub(
+                lambda m: " " if m.group(2)[:3].lower() in MONTH_NAMES else m.group(0), line)
+            remainder = TEXT_DATE_MDY_RE.sub(
+                lambda m: " " if m.group(1)[:3].lower() in MONTH_NAMES else m.group(0), remainder)
         remainder = TIME_RE.sub(" ", remainder)
 
         moed = None
@@ -367,9 +412,9 @@ def parse_exam_text_lines(page) -> list:
             prev_was_name = True
         course_name = " ".join(name_tokens).strip(" -.,:;|")
 
-        # A real course name has a few Hebrew letters; anything shorter is
-        # residue (a stray moed letter, a building abbreviation).
-        if len(HEBREW_LETTER_RE.findall(course_name)) < 3:
+        # A real course name has a few letters (Hebrew or Latin); anything
+        # shorter is residue (a stray moed letter, a building abbreviation).
+        if len(NAME_LETTER_RE.findall(course_name)) < 3:
             continue
 
         record = {
@@ -398,19 +443,31 @@ def parse_exam_text_lines(page) -> list:
 # tried. course_name is checked first regardless since its keywords don't
 # overlap with either grade field's.
 GRADE_FIELD_KEYWORDS = {
+    # credits MUST precede course_code: course_code's bare "קוד" fallback is
+    # a substring of "נקודות" ("נקודות זכות" contains קוד), so with the
+    # reverse order a credits column is silently absorbed as a second
+    # course-code match and never mapped -- caught by the synthetic-PDF
+    # suite the day course_code was added to this map.
+    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "זיכוי", "זכות", "credits", "credit", "ects"],
+    # Before course_name so a "Course Code"/"קוד קורס" column is absorbed
+    # here and never claimed by course_name's generic "קורס"/"course"
+    # fallback (same cross-field ordering trap as in FIELD_KEYWORDS above).
+    # The value is also carried into the record when present.
+    "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
     # "שם שעור" (no yud) is SCE college's own spelling on its grade-sheet
     # (transcript) export -- distinct from the "שם שיעור" spelling used on
     # SCE's exam-schedule export (see FIELD_KEYWORDS above). Confirmed
     # against a real SCE transcript PDF where this was the only column-header
     # variant present, so without it course_name never matched and the whole
     # sheet was rejected as "no grade table found".
-    "course_name": ["שם הקורס", "שם קורס", "שם השיעור", "שם שיעור", "שם שעור", "מקצוע", "קורס"],
-    "exam_grade": ["ציון מבחן", "ציון בחינה", "ציון בכתב"],
+    "course_name": ["שם הקורס", "שם קורס", "שם השיעור", "שם שיעור", "שם שעור", "מקצוע", "קורס",
+                    "course name", "course title", "subject", "course"],
+    "exam_grade": ["ציון מבחן", "ציון בחינה", "ציון בכתב", "exam grade", "exam score", "test grade"],
     # "ציון סופי" (final grade) -- listed before the bare "ציון" fallback for
-    # the same substring reason as above, applied within this field's own list.
-    "grade": ["ציון סופי", "ציון כולל", "ציון"],
-    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "זיכוי", "זכות"],
-    "label": ["סמסטר", "תקופה", "מועד", "שנת לימודים"],
+    # the same substring reason as above, applied within this field's own
+    # list; likewise "final grade" before the bare "grade".
+    "grade": ["ציון סופי", "ציון כולל", "ציון", "final grade", "final score", "grade", "mark", "score"],
+    "label": ["סמסטר", "תקופה", "מועד", "שנת לימודים", "semester", "term", "period", "year"],
 }
 
 GRADE_RE = re.compile(r"^(\d{1,3}(?:\.\d+)?)$")
@@ -419,9 +476,10 @@ GRADE_RE = re.compile(r"^(\d{1,3}(?:\.\d+)?)$")
 def match_grade_field(header_cell: str) -> Optional[str]:
     if not header_cell:
         return None
+    lowered = header_cell.lower()
     for field, keywords in GRADE_FIELD_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in header_cell:
+            if keyword in lowered:
                 return field
     return None
 
@@ -501,6 +559,9 @@ def parse_grade_table(table) -> list:
         label = cell(row, "label")
         if label:
             record["label"] = label
+        course_code = cell(row, "course_code")
+        if course_code:
+            record["course_code"] = course_code
 
         records.append(record)
 
@@ -509,13 +570,24 @@ def parse_grade_table(table) -> list:
 
 DAY_NAME_TO_IDX = {
     "ראשון": 0, "שני": 1, "שלישי": 2, "רביעי": 3, "חמישי": 4, "שישי": 5, "שבת": 6,
+    # English day headers, matched case-insensitively via _day_index below.
+    "sunday": 0, "sun": 0, "monday": 1, "mon": 1, "tuesday": 2, "tue": 2,
+    "wednesday": 3, "wed": 3, "thursday": 4, "thu": 4, "friday": 5, "fri": 5,
+    "saturday": 6, "sat": 6,
 }
+
+
+def _day_index(word: str) -> Optional[int]:
+    return DAY_NAME_TO_IDX.get(word) if word in DAY_NAME_TO_IDX else DAY_NAME_TO_IDX.get(word.lower())
 TIME_LABEL_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 COURSE_CODE_RE = re.compile(r"\b(\d{6,7}-\d{1,2})\b")
 ROOM_NUM_RE = re.compile(r"^\d{3,5}$")
 BUILDING_RE = re.compile(r"בניין|בנין")
 METADATA_RE = re.compile(r'ש["״]ש|נ["״]ז')
-LECTURER_TITLE_RE = re.compile(r'^(פרופ|ד["״]ר|דר|מר |גב["׳\'׳]|גברת|מהנדס|עו["״]ד)')
+LECTURER_TITLE_RE = re.compile(
+    r'^(פרופ|ד["״]ר|דר|מר |גב["׳\'׳]|גברת|מהנדס|עו["״]ד'
+    r'|(?i:prof|dr|mr|mrs|ms|eng)\.?\s)'
+)
 
 
 def _median(nums):
@@ -565,8 +637,9 @@ def parse_class_schedule(page):
     header_bottom = 0
     for w in words:
         t = fix_bidi_line(w["text"]).strip()
-        if t in DAY_NAME_TO_IDX:
-            day_centers.append(((w["x0"] + w["x1"]) / 2, DAY_NAME_TO_IDX[t]))
+        day_idx = _day_index(t)
+        if day_idx is not None:
+            day_centers.append(((w["x0"] + w["x1"]) / 2, day_idx))
             header_bottom = max(header_bottom, w["bottom"])
     if len(day_centers) < 3:
         return None
