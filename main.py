@@ -761,6 +761,161 @@ def parse_class_schedule(page):
     return records
 
 
+# --- Row-per-class table layout for class schedules (מערכת שעות) ---
+# parse_class_schedule above reads the weekly-calendar-grid layout (days
+# across columns, each class a bordered cell). Several institutions export
+# the same schedule as a plain table instead -- one row per class with
+# day / from-hour / to-hour / course code / course name / credits / weekly
+# hours / lecturer / room columns (confirmed against a real SCE export,
+# whose grid detection found no day-header row at all and the whole file
+# was rejected as "no schedule recognized"). Same header-keyword approach
+# as FIELD_KEYWORDS/GRADE_FIELD_KEYWORDS, with the same two ordering
+# sensitivities: within a field, specific phrases before generic ones, and
+# ACROSS fields because match_class_field checks fields in this dict's own
+# order and returns on the first substring hit.
+CLASS_FIELD_KEYWORDS = {
+    # end_time first of the time-ish fields: "שעה" (start_time's generic
+    # fallback) is a substring of "עד שעה", and "יום" (day's keyword) is a
+    # substring of "סיום" -- so end_time must be tried before both
+    # start_time and day can see the cell.
+    "end_time": ["עד שעה", "שעה עד", "שעת סיום", "סיום", "end time", "until", "finish"],
+    # A weekly-hours column ("שעות", SCE's ש"ש) would otherwise be claimed
+    # by start_time's bare "שעה" fallback -- absorbed here and then simply
+    # not carried into the record.
+    "hours": ["שעות", 'ש"ש', "ש״ש", "weekly hours", "hours"],
+    "start_time": ["משעה", "שעת התחלה", "שעה מ", "התחלה", "שעה", "start time", "start", "from", "hour"],
+    "day": ["יום", "day"],
+    # credits before course_code: "קוד" is a substring of "נקודות" (the
+    # same trap documented on GRADE_FIELD_KEYWORDS above).
+    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "נ״ז", "זיכוי", "credits", "credit", "ects"],
+    # course_code before course_name: course_name's generic "שיעור"/"קורס"
+    # fallbacks are substrings of "קוד שיעור"/"קוד קורס".
+    "course_code": ["קוד שיעור", "קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
+    "course_name": ["שם שיעור", "שם השיעור", "שם שעור", "שם הקורס", "שם קורס", "שם מקצוע", "מקצוע", "שיעור", "קורס",
+                    "course name", "course title", "subject", "course"],
+    "lecturer": ["מרצה", "lecturer", "instructor", "teacher"],
+    "room": ["חדר", "כיתה", "אולם", "מיקום", "בניין", "room", "hall", "location", "classroom", "building"],
+}
+
+# Single-letter day cells ("א".."ו", "ש" for Saturday) -- how the SCE table
+# export writes its day column. Full day names go through _day_index.
+CLASS_DAY_LETTERS = {"א": 0, "ב": 1, "ג": 2, "ד": 3, "ה": 4, "ו": 5, "ש": 6}
+DAY_PREFIX_RE = re.compile(r"^יום\s*")
+
+
+def parse_class_day(raw: str) -> Optional[int]:
+    if not raw:
+        return None
+    text = DAY_PREFIX_RE.sub("", raw.strip()).strip(" '׳´`\"”.")
+    idx = _day_index(text)
+    if idx is not None:
+        return idx
+    return CLASS_DAY_LETTERS.get(text)
+
+
+def match_class_field(header_cell: str) -> Optional[str]:
+    if not header_cell:
+        return None
+    lowered = header_cell.lower()
+    for field, keywords in CLASS_FIELD_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in lowered:
+                return field
+    return None
+
+
+def detect_class_header_row(table):
+    """Same approach as detect_header_row (bidi-reversal detected per-table,
+    best-scoring row within the first few), against CLASS_FIELD_KEYWORDS."""
+    best_idx, best_score, best_reverse = -1, 0, False
+    for idx, row in enumerate(table[:5]):
+        for reverse in (False, True):
+            score = sum(1 for cell in row if match_class_field(normalize_cell(cell, reverse)))
+            if score > best_score:
+                best_idx, best_score, best_reverse = idx, score, reverse
+    if best_score < MIN_HEADER_KEYWORD_HITS:
+        return -1, False
+    return best_idx, best_reverse
+
+
+def map_class_columns(header_row, reverse: bool) -> dict:
+    mapping = {}
+    for idx, raw_cell in enumerate(header_row):
+        field = match_class_field(normalize_cell(raw_cell, reverse))
+        if field and field not in mapping:
+            mapping[field] = idx
+    return mapping
+
+
+def parse_class_table(table) -> list:
+    """Row-per-class table -> the same record shape parse_class_schedule
+    produces, so the frontend review table needs no translation."""
+    if not table:
+        return []
+    header_idx, reverse = detect_class_header_row(table)
+    if header_idx == -1:
+        return []
+    mapping = map_class_columns(table[header_idx], reverse)
+    # Without a day and a start time this is some other course table (an
+    # exam schedule, a transcript), not a weekly class schedule.
+    if "course_name" not in mapping or "day" not in mapping or "start_time" not in mapping:
+        return []
+
+    def cell(row, field):
+        idx = mapping.get(field)
+        if idx is None or idx >= len(row):
+            return ""
+        return normalize_cell(row[idx], reverse)
+
+    records = []
+    last_day = None
+    for row in table[header_idx + 1:]:
+        if row is None or all(not normalize_cell(c) for c in row):
+            continue
+
+        course_name = cell(row, "course_name")
+        if not course_name:
+            continue
+
+        # A merged/repeated day cell may extract as empty on continuation
+        # rows -- rows are grouped by day, so the previous row's day holds.
+        day = parse_class_day(cell(row, "day"))
+        if day is None:
+            day = last_day
+        if day is None:
+            continue
+        last_day = day
+
+        start_time = normalize_time(cell(row, "start_time"))
+        end_time = normalize_time(cell(row, "end_time"))
+        # Same RTL-flip safety as parse_table: classes never span midnight,
+        # so start > end is always the flipped case, never a real range.
+        if start_time and end_time and start_time > end_time:
+            start_time, end_time = end_time, start_time
+
+        credits = None
+        credits_raw = cell(row, "credits")
+        if credits_raw:
+            try:
+                credits = float(credits_raw.replace(",", "."))
+            except ValueError:
+                pass
+
+        records.append({
+            "course_name": course_name,
+            "day": day,
+            "start_time": start_time,
+            "end_time": end_time,
+            "lecturer": cell(row, "lecturer"),
+            "room": cell(row, "room"),
+            "course_code": cell(row, "course_code"),
+            "credits": credits if credits is not None else "",
+        })
+
+    records.sort(key=lambda c: (c["day"], c["start_time"] or ""))
+    return records
+
+
 # Generous enough for a real multi-page schedule/transcript, but bounded so
 # one adversarial or pathologically slow PDF can't hang a request forever.
 PARSE_TIMEOUT_SECONDS = 30
@@ -927,13 +1082,18 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
     contents = await file.read()
     validate_pdf_contents(contents)
 
-    def page_records(page):
-        # parse_class_schedule returns None (not []) for a page that isn't a
-        # recognizable grid schedule -- normalized here since the shared
-        # helper always does records.extend(page_records(page)).
-        return parse_class_schedule(page) or []
+    # Best-quality first, same layering idea as /parse-pdf: the geometric
+    # grid parser (which returns None -- normalized to [] -- for a page
+    # that isn't a grid schedule), then row-per-class tables with drawn
+    # borders, then borderless (text-aligned) tables. Only the first
+    # non-empty layer's records are used -- see _extract_records_sync.
+    strategies = [
+        lambda page: parse_class_schedule(page) or [],
+        lambda page: [r for table in page.extract_tables() for r in parse_class_table(table)],
+        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS) for r in parse_class_table(table)],
+    ]
 
-    records = await _parse_with_timeout(contents, page_records)
+    records = await _parse_with_timeout(contents, strategies)
 
     if not records:
         raise HTTPException(
