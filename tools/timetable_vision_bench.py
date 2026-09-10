@@ -185,7 +185,18 @@ TIMETABLE_SCHEMA: dict[str, Any] = {
                     },
                     "time_label_as_seen": {
                         "type": "string",
-                        "description": "The row/cell time text EXACTLY as printed, e.g. '10:00-12:00'.",
+                        "description": (
+                            "The hour labels this block spans, as printed in the hour column, "
+                            "as 'FIRST-LAST' e.g. '08:30-10:45'. Empty if the block carries no "
+                            "readable time text of its own."
+                        ),
+                    },
+                    "weekly_hours_as_seen": {
+                        "type": "string",
+                        "description": (
+                            "The ש\"ש value printed in the cell, digits only, e.g. '1.5'. "
+                            "Empty string if the cell does not show one. Never compute it."
+                        ),
                     },
                     "day_index": {
                         "type": "integer",
@@ -205,6 +216,7 @@ TIMETABLE_SCHEMA: dict[str, Any] = {
                     "kind",
                     "day_label_as_seen",
                     "time_label_as_seen",
+                    "weekly_hours_as_seen",
                     "day_index",
                     "start",
                     "end",
@@ -251,20 +263,40 @@ Established already, by reading the header row of this same image:
   hours run along        : {header.get('time_axis', 'unknown')}
 
 Use that. If direction is "rtl", the RIGHTMOST day column is the first day of
-the week - do not assume the leftmost column is Sunday.
+the week - do not assume the leftmost column is Sunday. In these documents the
+hour column is often on the RIGHT edge, not the left; read the hours from
+wherever the header probe found them.
+
+PRIVACY - read this first:
+These documents usually open with a personal block holding the student's name,
+national ID, home address, phone and email. Do NOT extract, transcribe, echo or
+summarise any of it, in any field. Skip that block entirely and start at the
+weekly grid.
 
 Rules:
-1. For every meeting, copy `day_label_as_seen` and `time_label_as_seen` verbatim
-   from the image. These are your evidence; they will be checked against your
-   day_index and start/end.
-2. A cell spanning several hour-rows is ONE meeting whose end time is the end of
-   the last row it covers - not several one-hour meetings.
-3. Israeli week: 0=ראשון, 1=שני, 2=שלישי, 3=רביעי, 4=חמישי, 5=שישי, 6=שבת.
-4. Leave a field as an empty string when the image does not show it. Never guess
-   a room, an instructor or a time.
-5. If part of the image is unreadable, list it in unreadable_regions and omit
+1. For every meeting, copy `day_label_as_seen`, `time_label_as_seen` and
+   `weekly_hours_as_seen` verbatim from the image. These are your evidence; they
+   are checked in code against your day_index and start/end. Never adjust the
+   evidence to agree with your answer - if they disagree, report both as seen.
+2. A block spanning several hour-rows is ONE meeting, not several one-hour ones.
+   Read its start and end from the GRID LINES the block's top and bottom edges
+   touch, not from where the text happens to sit inside it - these blocks carry
+   a lot of internal blank space, and the text is usually not flush with either
+   edge.
+3. Empty day columns are normal and common - many students have classes on only
+   two or three days. If a column has no blocks, it has no meetings. Never fill
+   a quiet day with a plausible class.
+4. Israeli week: 0=ראשון, 1=שני, 2=שלישי, 3=רביעי, 4=חמישי, 5=שישי, 6=שבת.
+5. `course_name` is the course title only. Delivery-mode notes in parentheses
+   (קמפוס, מקוון, לסירוגין, היברידי ...) are NOT part of the name - drop them.
+   A trailing שיעור / תרגול / מעבדה / סמינר goes in `kind`, and the base
+   `course_name` must stay byte-identical to the lecture's, so the two can be
+   merged into one course later.
+6. Leave a field as an empty string when the image does not show it. Never guess
+   a room, an instructor, a time or a ש"ש value.
+7. If part of the image is unreadable, list it in unreadable_regions and omit
    those meetings. An honest gap beats an invented class.
-6. Ignore legends, footnotes and any table that is not the weekly grid."""
+8. Ignore legends, footnotes, totals and any table that is not the weekly grid."""
 
 
 # --------------------------------------------------------------------------
@@ -357,9 +389,11 @@ class Meeting:
     end: int | None
     day_label: str
     time_label: str
+    weekly_hours: str
     location: str
     confidence: str
     issues: list[str] = field(default_factory=list)
+    soft: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -390,6 +424,7 @@ def to_meetings(payload: dict[str, Any], header: dict[str, Any]) -> list[Meeting
             end=end,
             day_label=day_label,
             time_label=raw.get("time_label_as_seen", ""),
+            weekly_hours=str(raw.get("weekly_hours_as_seen", "")).strip(),
             location=raw.get("location", "").strip(),
             confidence=raw.get("confidence", ""),
         )
@@ -422,6 +457,22 @@ def to_meetings(payload: dict[str, Any], header: dict[str, Any]) -> list[Meeting
             m.issues.append(f"start outside teaching hours: {hhmm(start)}")
         if not m.course:
             m.issues.append("empty course name")
+
+        # ש"ש printed in the cell is an independent check on the block geometry:
+        # one academic hour is 45 minutes, and a slot adds breaks on top.
+        if m.weekly_hours and start is not None and end is not None:
+            try:
+                ss = float(m.weekly_hours)
+            except ValueError:
+                m.soft.append(f'unparseable ש"ש: {m.weekly_hours!r}')
+            else:
+                duration = end - start
+                low, high = ss * 40, ss * 45 + 60
+                if not (low <= duration <= high):
+                    m.soft.append(
+                        f'ש"ש={ss:g} implies roughly {low / 60:.1f}-{high / 60:.1f}h '
+                        f"but the block was read as {duration / 60:.1f}h"
+                    )
 
         out.append(m)
 
@@ -564,6 +615,14 @@ def report(image: Path, runs_by_model: dict[str, list[Run]], gold: list[Meeting]
                 print(f"  run{r.index}  {m.describe()}")
                 for issue in m.issues:
                     print(f"          - {issue}")
+        soft = [(r, m) for r in runs for m in r.meetings if m.soft]
+        if soft:
+            print(f"\ngeometry warnings (ש\"ש vs block height) - {model}")
+            for r, m in soft:
+                print(f"  run{r.index}  {m.describe()}")
+                for note in m.soft:
+                    print(f"          - {note}")
+
         unread = [u for r in runs for u in r.payload.get("unreadable_regions", [])]
         if unread:
             print(f"\nreported as unreadable - {model}")
