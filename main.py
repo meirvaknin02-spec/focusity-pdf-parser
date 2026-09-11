@@ -86,7 +86,13 @@ DATE_RE = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})")
 TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
 TIME_RANGE_RE = re.compile(r"(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})")
 HEBREW_LETTER_RE = re.compile("[֐-׿]")
-RUN_RE = re.compile(r"\d+|\D+")
+# A number keeps its inner separators: "1.5", "12:00" and "27/12/2026" are
+# one run each, so reversing the run ORDER can never turn them into "5.1",
+# "00:12" or "2026/12/27" (all three were seen on real SCE/Sapir exports).
+RUN_RE = re.compile(r"\d+(?:[.,:/]\d+)*|\D+")
+# Brackets are mirror glyphs: a reversed "(קמפוס)" must come back as
+# "(קמפוס)", not ")קמפוס(" -- the shape that leaked into course names.
+MIRROR_BRACKETS = str.maketrans("()[]{}<>", ")(][}{><")
 
 MIN_HEADER_KEYWORD_HITS = 2
 
@@ -132,7 +138,7 @@ def fix_bidi_line(line: str) -> str:
         return line
     runs = RUN_RE.findall(line)
     runs.reverse()
-    return "".join(run if run[0].isdigit() else run[::-1] for run in runs)
+    return "".join(run if run[0].isdigit() else run[::-1].translate(MIRROR_BRACKETS) for run in runs)
 
 
 def normalize_cell(cell, reverse: bool = False) -> str:
@@ -632,6 +638,46 @@ LECTURER_TITLE_RE = re.compile(
 )
 
 
+# "קלקולוס 1 - שיעור (קמפוס)", "מבוא לכלכלה -תרגול (לסרוגין:קמפוס ומקוון)",
+# "סטטיסטיקה ישומית-ת": the institution packs the meeting type and the
+# delivery mode into the course name. Left there, the lecture and the
+# practice session of one course become two courses in the app (confirmed
+# on a real Sapir timetable: 6 courses came out as 10). The name keeps
+# only the course; the rest travels in its own fields.
+MEETING_TYPE_TOKENS = [
+    # (regex on the trailing part of the name, canonical type)
+    (r"(?:^|[\s\-–—])(?:תרגול|תירגול|תרגיל)(?:\s+(?:במכללה|בקמפוס|מקוון))?\s*$", "practice"),
+    (r"(?:^|[\s\-–—])(?:שיעור|הרצאה)\s*$", "lecture"),
+    (r"(?:^|[\s\-–—])(?:מעבדה|מעבדת)\s*$", "lab"),
+    (r"(?:^|[\s\-–—])(?:סדנה|סמינר)\s*$", "workshop"),
+    (r"\s*-\s*ת\s*$", "practice"),   # SCE's "-ת"
+    (r"\s*-\s*ה\s*$", "lecture"),    # SCE's "-ה"
+    (r"\s*-\s*מ\s*$", "lab"),        # SCE's "-מ"
+    (r"(?:^|\s)(?:practice|tutorial|recitation|exercise)\s*$", "practice"),
+    (r"(?:^|\s)(?:lecture)\s*$", "lecture"),
+    (r"(?:^|\s)(?:lab|laboratory)\s*$", "lab"),
+]
+PARENTHETICAL_RE = re.compile(r"\s*[(\[][^()\[\]]{0,60}[)\]]\s*")
+
+
+def split_course_name(raw: str):
+    """-> (course_name, meeting_type, notes). The parenthetical delivery
+    mode ("(קמפוס)", "(לסרוגין:קמפוס ומקוון)") becomes `notes`; a trailing
+    meeting-type word becomes `meeting_type`; dangling " - " is trimmed."""
+    name = re.sub(r"\s+", " ", str(raw or "")).strip()
+    notes = " ".join(m.strip(" ()[]") for m in PARENTHETICAL_RE.findall(name)).strip()
+    name = PARENTHETICAL_RE.sub(" ", name).strip()
+    meeting_type = ""
+    for pattern, kind in MEETING_TYPE_TOKENS:
+        m = re.search(pattern, name, flags=re.IGNORECASE)
+        if m:
+            meeting_type = kind
+            name = name[:m.start()].rstrip()
+            break
+    name = re.sub(r"[\s\-–—]+$", "", name).strip()
+    return name or str(raw or "").strip(), meeting_type, notes
+
+
 def _median(nums):
     s = sorted(nums)
     n = len(s)
@@ -739,11 +785,31 @@ def parse_class_schedule(page):
         return None
 
     # 4. For each class cell, read its own lines and classify them.
+    #
+    # The credits/weekly-hours lines ("נ"ז3:", "ש"ש1.5:") are drawn UNDER the
+    # class rectangle on Sapir's export -- the box covers the class time, the
+    # metadata overflows below it -- so a strict in-rect crop lost them for
+    # every class but the tallest (2 of 4 credit values on a real file).
+    # Each cell also reads a thin band below itself, capped at the next class
+    # box in the same column, and keeps only metadata-shaped lines from it.
+    def band_below(rect, day_idx):
+        floor = rect["bottom"] + max(row_gap * 1.5, 14)
+        for other, other_day in class_rects:
+            if other is rect or other_day != day_idx:
+                continue
+            if other["top"] >= rect["bottom"] - 1 and other["top"] < floor:
+                floor = other["top"]
+        if floor <= rect["bottom"] + 1:
+            return []
+        band = {"top": rect["bottom"], "bottom": floor, "x0": rect["x0"], "x1": rect["x1"]}
+        return [ln for ln in _cell_lines(page, band) if METADATA_RE.search(ln) or COURSE_CODE_RE.search(ln)]
+
     records = []
     for r, day in class_rects:
         lines = _cell_lines(page, r)
         if not lines:
             continue
+        lines = lines + band_below(r, day)
 
         start_time = snap_time(r["top"])
         end_time = snap_time(r["bottom"])
@@ -764,9 +830,12 @@ def parse_class_schedule(page):
                 course_code = code_m.group(1)
                 continue
             if METADATA_RE.search(text):
-                cm = re.search(r'נ["״]ז[:\s]*([0-9]+)', text)
+                # "נ"ז3:" as printed, or ":3ז"נ" when a generator flipped it.
+                cm = re.search(r'נ["״]ז[:\s]*([0-9]+(?:\.[0-9]+)?)', text) or re.search(r'([0-9]+(?:\.[0-9]+)?)\s*:?\s*ז["״]נ', text)
                 if cm and credits is None:
-                    credits = int(cm.group(1))
+                    credits = float(cm.group(1))
+                    if credits.is_integer():
+                        credits = int(credits)
                 continue
             if ROOM_NUM_RE.match(text):
                 if not room_num:
@@ -785,11 +854,13 @@ def parse_class_schedule(page):
             if not seen_lecturer:
                 name_lines.append(text)
 
-        course_name = " ".join(name_lines).strip()
+        course_name, meeting_type, notes = split_course_name(" ".join(name_lines))
         location = " ".join(x for x in (building, room_num) if x).strip()
 
         records.append({
             "course_name": course_name,
+            "meeting_type": meeting_type,
+            "notes": notes,
             "day": day,
             "start_time": start_time,
             "end_time": end_time,
@@ -943,8 +1014,11 @@ def parse_class_table(table) -> list:
             except ValueError:
                 pass
 
+        course_name, meeting_type, notes = split_course_name(course_name)
         records.append({
             "course_name": course_name,
+            "meeting_type": meeting_type,
+            "notes": notes,
             "day": day,
             "start_time": start_time,
             "end_time": end_time,
