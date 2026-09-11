@@ -71,7 +71,9 @@ FIELD_KEYWORDS = {
     # different SCE exports use different ones.
     "course_name": ["שם הקורס", "שם קורס", "שם המקצוע", "שם שיעור", "שם השיעור", "שם שעור", "מקצוע", "קורס",
                     "course name", "course title", "subject", "course"],
-    "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך", "exam date", "date"],
+    # "ת.בחינה" is SCE's abbreviated "תאריך בחינה" header (confirmed against a
+    # real exam-schedule PDF); the bare "תאריך" keyword never matches it.
+    "date": ["תאריך הבחינה", "תאריך מבחן", "יום ותאריך", "תאריך", "ת.בחינה", "ת. בחינה", "exam date", "date"],
     # end_time before start_time: "time" (start_time's generic fallback) is
     # a substring of "end time", the same trap as שעה inside "עד שעה".
     "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום", "end time", "until", "finish"],
@@ -202,12 +204,16 @@ def extract_time_range(raw: str):
 
 
 def match_field(header_cell: str) -> Optional[str]:
+    """Substring match, ignoring whitespace on both sides: pdfplumber breaks
+    a wrapped header into "מס.שיעור\nוקבוצה" and detaches Hebrew final
+    letters ("ה ניחב.ת" reversed is "ת.בחינ ה"), so "ת.בחינה" would never
+    match the cell as extracted."""
     if not header_cell:
         return None
-    lowered = header_cell.lower()
+    squashed = re.sub(r"\s+", "", header_cell.lower())
     for field, keywords in FIELD_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in lowered:
+            if re.sub(r"\s+", "", keyword) in squashed:
                 return field
     return None
 
@@ -241,6 +247,31 @@ def map_columns(header_row, reverse: bool) -> dict:
     return mapping
 
 
+# Final forms plus ת: the letters pdfplumber was seen detaching from the end
+# of a word ("הנדסי ת", "פרויקטי ם"). Deliberately not every letter -- a
+# trailing "א"/"ב" is a real group/part marker ("פיסיקה 2 ב") and must stay.
+FINAL_LETTER_GAP_RE = re.compile(r"(?<=[א-ת]) ([ךםןףץת])(?=\s|$)")
+
+
+def _rejoin_final_letters(text: str) -> str:
+    """pdfplumber sometimes extracts a word's last letter with a space
+    before it ("אמינות הנדסי ת"); no Hebrew word is a lone final letter."""
+    return FINAL_LETTER_GAP_RE.sub(r"\1", text)
+
+
+def _only_match(row, reverse: bool, pattern, convert):
+    """The single cell in `row` matching `pattern`, converted; None when
+    zero or several cells match (several = ambiguous, leave it alone)."""
+    hits = []
+    for raw in row:
+        value = normalize_cell(raw, reverse)
+        if value and pattern.search(value):
+            converted = convert(value)
+            if converted:
+                hits.append(converted)
+    return hits[0] if len(hits) == 1 else None
+
+
 def parse_table(table) -> list:
     if not table:
         return []
@@ -262,15 +293,26 @@ def parse_table(table) -> list:
         if row is None or all(not normalize_cell(c) for c in row):
             continue
 
-        course_name = cell(row, "course_name")
+        course_name = _rejoin_final_letters(cell(row, "course_name"))
         if not course_name:
             continue
 
+        # A multi-row header (e.g. "החדר בו / תתקיים / הבחינה" stacked over
+        # one column) can shift pdfplumber's header cells one slot away
+        # from the body cells beneath them -- confirmed on a real SCE exam
+        # schedule, where the date header landed one column left of every
+        # date. When the mapped cell holds no date, take the row's only
+        # date-shaped cell instead; a row with two candidates stays
+        # ambiguous and is skipped as before.
         date_iso = normalize_date(cell(row, "date"))
+        if not date_iso:
+            date_iso = _only_match(row, reverse, DATE_RE, normalize_date)
         if not date_iso:
             continue
 
         start_raw = cell(row, "start_time")
+        if not normalize_time(start_raw):
+            start_raw = _only_match(row, reverse, TIME_RE, lambda s: s) or start_raw
         end_raw = cell(row, "end_time")
         start_time = normalize_time(start_raw) if start_raw else None
         end_time = normalize_time(end_raw) if end_raw else None
@@ -296,7 +338,7 @@ def parse_table(table) -> list:
             "end_time": end_time,
         }
         room = cell(row, "room")
-        if room:
+        if room and re.search(r"\w", room):  # "*" / "-" placeholders carry nothing
             record["room"] = room
         moed = cell(row, "moed")
         if moed:
