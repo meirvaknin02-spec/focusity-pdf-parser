@@ -632,6 +632,12 @@ LECTURER_TITLE_RE = re.compile(
 )
 
 
+def _label_to_minutes(label: str) -> int:
+    """'09:30' -> 570. Only ever called on labels TIME_LABEL_RE already matched."""
+    hh, mm = label.split(":")
+    return int(hh) * 60 + int(mm)
+
+
 def _median(nums):
     s = sorted(nums)
     n = len(s)
@@ -716,8 +722,26 @@ def parse_class_schedule(page):
     time_col_center = _median([x for _, _, x in kept])
     grid_bottom = time_labels[-1][0] + max(row_gap, 12)
 
+    # The hour column only names whole rows (30 minutes at SCE), but not every
+    # institution draws its class blocks on those lines: Sapir puts them on HALF
+    # rows too, i.e. quarter past and quarter to. Snapping such a block to the
+    # nearest *printed* label silently pulls it 15 minutes earlier -- measured on
+    # a real Sapir timetable, 3 of 10 classes came out a quarter of an hour early
+    # with no warning of any kind. So the ladder gets the midpoints added to it.
+    # Nearest-match semantics are kept deliberately: block edges sit a couple of
+    # points off the label they belong to, and matching by distance absorbs that
+    # offset, where interpolating from label coordinates would not.
+    snap_points = []  # (y, minutes)
+    for (y_a, label_a), (y_b, label_b) in zip(time_labels, time_labels[1:]):
+        m_a, m_b = _label_to_minutes(label_a), _label_to_minutes(label_b)
+        snap_points.append((y_a, m_a))
+        if m_b - m_a > 0:
+            snap_points.append(((y_a + y_b) / 2.0, (m_a + m_b) // 2))
+    snap_points.append((time_labels[-1][0], _label_to_minutes(time_labels[-1][1])))
+
     def snap_time(y):
-        return min(time_labels, key=lambda p: abs(p[0] - y))[1]
+        minutes = min(snap_points, key=lambda p: abs(p[0] - y))[1]
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
     # 3. Class cells: rectangles below the header, one day-column wide, sitting
     # in a day column (not the time column).
