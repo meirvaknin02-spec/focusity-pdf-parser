@@ -1,0 +1,122 @@
+[
+ {
+  "course_name": "התנהגות ארגונית",
+  "meeting_type": "",
+  "notes": "",
+  "day": 3,
+  "start_time": "08:30",
+  "end_time": "11:00",
+  "lecturer": "גב' מורג יהודית",
+  "room": "בניין 9 אקדמיה 9102",
+  "course_code": "1101048-1",
+  "credits": 3
+ },
+ {
+  "course_name": "מבוא למערכות מידע ושימושי מחשב",
+  "meeting_type": "",
+  "notes": "לסרוגין:קמפוס ומקוון",
+  "day": 3,
+  "start_time": "12:00",
+  "end_time": "14:30",
+  "lecturer": "ד\"ר זפרני עודד",
+  "room": "בניין 11 אקדמיה 11001",
+  "course_code": "1101122-1",
+  "credits": ""
+ },
+ {
+  "course_name": "מבוא למערכות מידע ושימושי מחשב",
+  "meeting_type": "practice",
+  "notes": "",
+  "day": 3,
+  "start_time": "14:30",
+  "end_time": "16:00",
+  "lecturer": "ד\"ר זפרני עודד",
+  "room": "בניין 11 אקדמיה 11001",
+  "course_code": "",
+  "credits": ""
+ },
+ {
+  "course_name": "מבוא לכלכלה ללא כלכלנים",
+  "meeting_type": "",
+  "notes": "לסרוגין:קמפוס ומקוון",
+  "day": 3,
+  "start_time": "16:30",
+  "end_time": "19:00",
+  "lecturer": "מר באסון סהר",
+  "room": "בניין 9 אקדמיה 9103",
+  "course_code": "1101096-1",
+  "credits": ""
+ },
+ {
+  "course_name": "מבוא לכלכלה ללא כלכלנים",
+  "meeting_type": "practice",
+  "notes": "לסרוגין:קמפוס ומקוון",
+  "day": 3,
+  "start_time": "19:00",
+  "end_time": "20:30",
+  "lecturer": "גב' זגורי בת-אל דונאל",
+  "room": "9103",
+  "course_code": "",
+  "credits": ""
+ },
+ {
+  "course_name": "אנגלית בסיסית",
+  "meeting_type": "",
+  "notes": "",
+  "day": 4,
+  "start_time": "08:30",
+  "end_time": "11:00",
+  "lecturer": "ד\"ר צ'מני אבי",
+  "room": "בניין 4 בית הסטודנט 4004",
+  "course_code": "6201004-1",
+  "credits": 0
+ },
+ {
+  "course_name": "יסודות החשבונאות",
+  "meeting_type": "",
+  "notes": "קמפוס",
+  "day": 4,
+  "start_time": "13:00",
+  "end_time": "15:30",
+  "lecturer": "ד\"ר בלייוייס רעות",
+  "room": "בניין 12 אקדמיה 12003",
+  "course_code": "1101013-2",
+  "credits": 3
+ },
+ {
+  "course_name": "אלגברה לינארית",
+  "meeting_type": "",
+  "notes": "קמפוס",
+  "day": 4,
+  "start_time": "16:00",
+  "end_time": "17:30",
+  "lecturer": "ד\"ר זפרני עודד",
+  "room": "בניין 12 אקדמיה 12003",
+  "course_code": "",
+  "credits": ""
+ },
+ {
+  "course_name": "קלקולוס 1",
+  "meeting_type": "lecture",
+  "notes": "קמפוס",
+  "day": 5,
+  "start_time": "08:30",
+  "end_time": "11:00",
+  "lecturer": "מר אביבי דולב",
+  "room": "בניין 8 אקדמיה 8202",
+  "course_code": "1101004-3",
+  "credits": 4
+ },
+ {
+  "course_name": "קלקולוס 1",
+  "meeting_type": "practice",
+  "notes": "",
+  "day": 5,
+  "start_time": "11:00",
+  "end_time": "12:30",
+  "lecturer": "מר פרידמן אלכסנדר",
+  "room": "בניין 12 אקדמיה 12104",
+  "course_code": "",
+  "credits": ""
+ }
+]

@@ -1,0 +1,79 @@
+[
+ {
+  "course_name": "אמינות הנדסית",
+  "date": "2026-12-27",
+  "start_time": "12:00",
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "הנדסת איכות",
+  "date": "2027-01-19",
+  "start_time": null,
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "אמינות הנדסית",
+  "date": "2027-01-25",
+  "start_time": null,
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "תכנון פיקוח ייצור 1",
+  "date": "2027-01-28",
+  "start_time": null,
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "ניהול פרויקטים",
+  "date": "2027-02-03",
+  "start_time": null,
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "חקר עבודה 1",
+  "date": "2027-02-09",
+  "start_time": null,
+  "end_time": null,
+  "moed": "1"
+ },
+ {
+  "course_name": "הנדסת איכות",
+  "date": "2027-02-14",
+  "start_time": null,
+  "end_time": null,
+  "moed": "2"
+ },
+ {
+  "course_name": "אמינות הנדסית",
+  "date": "2027-02-17",
+  "start_time": null,
+  "end_time": null,
+  "moed": "2"
+ },
+ {
+  "course_name": "תכנון פיקוח ייצור 1",
+  "date": "2027-02-21",
+  "start_time": null,
+  "end_time": null,
+  "moed": "2"
+ },
+ {
+  "course_name": "ניהול פרויקטים",
+  "date": "2027-02-24",
+  "start_time": null,
+  "end_time": null,
+  "moed": "2"
+ },
+ {
+  "course_name": "חקר עבודה 1",
+  "date": "2027-02-26",
+  "start_time": null,
+  "end_time": null,
+  "moed": "2"
+ }
+]

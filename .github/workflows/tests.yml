@@ -1,0 +1,20 @@
+name: tests
+
+# Every push and pull request runs the real-form tests. Render deploys main on
+# its own, so a red run here is the warning that the live parser is about to
+# (or already did) change behaviour for a file students actually upload.
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
