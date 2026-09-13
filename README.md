@@ -88,3 +88,17 @@ show a "this can take a moment" state on first use.
 Open to all origins by default (`Access-Control-Allow-Origin: *`) since the
 endpoint takes no cookies/auth and returns no user-specific data. Set the
 `CORS_ALLOW_ORIGINS` env var to a comma-separated allowlist to restrict it.
+
+## Tests
+
+Real exported PDFs (with every personal detail removed) are parsed end to end
+and compared with the output they are known to produce:
+
+    pip install -r requirements-dev.txt
+    pytest -q
+
+The same run happens on every push (`.github/workflows/tests.yml`). To add a
+new institution's file after fixing the parser for it, redact it with
+`tools/make_fixtures.py`, check the parsed output against the PDF by eye, and
+save it next to the others in `tests/expected/`. The repository is public:
+never commit an un-redacted export.

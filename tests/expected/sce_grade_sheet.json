@@ -1,0 +1,146 @@
+[
+ {
+  "course_name": "חדו\"א - 1",
+  "grade": 90.0,
+  "credits": 5.0,
+  "course_code": "000-0300021"
+ },
+ {
+  "course_name": "מבוא למערכות מידע",
+  "grade": 84.0,
+  "credits": 3.5,
+  "course_code": "000-5000391"
+ },
+ {
+  "course_name": "מבוא לניהול התפעול",
+  "grade": 76.0,
+  "credits": 3.0,
+  "course_code": "000-5000861"
+ },
+ {
+  "course_name": "יסודות ההסתברות-ה",
+  "grade": 80.0,
+  "credits": 4.0,
+  "course_code": "000-5001081"
+ },
+ {
+  "course_name": "אלגברה לינארית-ה",
+  "grade": 82.0,
+  "credits": 3.5,
+  "course_code": "000-5001161"
+ },
+ {
+  "course_name": "חדו\"א - 2",
+  "grade": 83.0,
+  "credits": 5.0,
+  "course_code": "000-0300011"
+ },
+ {
+  "course_name": "מעבדה לפיסיקה 1",
+  "grade": 68.0,
+  "credits": 0.25,
+  "course_code": "000-0400231"
+ },
+ {
+  "course_name": "פיסיקה 1ב-ה",
+  "grade": 79.0,
+  "credits": 3.5,
+  "course_code": "000-0400311"
+ },
+ {
+  "course_name": "יסודות החשבונאות",
+  "grade": 60.0,
+  "credits": 3.5,
+  "course_code": "000-5000761"
+ },
+ {
+  "course_name": "הסקה סטטיסטית",
+  "grade": 75.0,
+  "credits": 4.0,
+  "course_code": "000-5001111"
+ },
+ {
+  "course_name": "ישומי מחשב לתעשיה וניהול",
+  "grade": 89.0,
+  "credits": 1.0,
+  "course_code": "000-5090406"
+ },
+ {
+  "course_name": "מעבדה לפיסיקה 2-ה",
+  "grade": 91.0,
+  "credits": 0.25,
+  "course_code": "000-0400081"
+ },
+ {
+  "course_name": "פיסיקה 2 ב",
+  "grade": 61.0,
+  "credits": 3.5,
+  "course_code": "000-0400141"
+ },
+ {
+  "course_name": "יסודות התכנות א",
+  "grade": 79.0,
+  "credits": 3.75,
+  "course_code": "000-5000106"
+ },
+ {
+  "course_name": "חקר ביצועים דטרמיניסטי",
+  "grade": 83.0,
+  "credits": 4.0,
+  "course_code": "000-5000271"
+ },
+ {
+  "course_name": "מיקרו כלכלה-ה",
+  "grade": 66.0,
+  "credits": 4.0,
+  "course_code": "000-5000421"
+ },
+ {
+  "course_name": "התנהגות ארגונית",
+  "grade": 61.0,
+  "credits": 3.0,
+  "course_code": "000-5000701"
+ },
+ {
+  "course_name": "כלכלה ניהולית",
+  "grade": 72.0,
+  "credits": 3.5,
+  "course_code": "000-5000811"
+ },
+ {
+  "course_name": "יסודות התכנות ב",
+  "grade": 91.0,
+  "credits": 3.5,
+  "course_code": "000-5000107"
+ },
+ {
+  "course_name": "חקר ביצועים סטוכסטי",
+  "grade": 75.0,
+  "credits": 4.0,
+  "course_code": "000-5000301"
+ },
+ {
+  "course_name": "סטטיסטיקה ישומית",
+  "grade": 72.0,
+  "credits": 4.0,
+  "course_code": "000-5000481"
+ },
+ {
+  "course_name": "יסודות המימון",
+  "grade": 74.0,
+  "credits": 3.5,
+  "course_code": "000-5000841"
+ },
+ {
+  "course_name": "ניהול השיווק",
+  "grade": 89.0,
+  "credits": 3.0,
+  "course_code": "000-5000891"
+ },
+ {
+  "course_name": "ניהול משאבי אנוש",
+  "grade": 63.0,
+  "credits": 3.0,
+  "course_code": "000-5001001"
+ }
+]
