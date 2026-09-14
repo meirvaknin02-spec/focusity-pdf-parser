@@ -112,121 +112,6 @@ PDF_MAGIC = b"%PDF-"
 PDF_MAGIC_SEARCH_WINDOW = 1024
 
 
-# --- ToUnicode recovery for legacy no-CMap Hebrew fonts ---
-# Confirmed against a real University of Haifa course-registration/schedule
-# export: its fonts carry no /ToUnicode CMap at all and rely on a plain
-# Windows-Hebrew-style /Encoding /Differences array (byte code -> glyph name
-# like "alef", "bet", ...) purely so a screen/printer substitutes the right
-# glyph -- there is nothing for a text-extraction library to resolve a byte
-# code to Unicode with. pdfplumber (via pdfminer), pypdf and PyMuPDF were all
-# confirmed independently to return U+FFFD for every Hebrew character on such
-# a font, which is why the file failed with "no table recognized": every
-# Hebrew header keyword this parser matches against is unmatchable when the
-# extracted text is all replacement characters. The glyph names are present
-# and unambiguous, so the byte -> Hebrew mapping is fully recoverable; this
-# synthesizes a /ToUnicode CMap from /Differences and attaches it to any font
-# missing one, so every existing extraction path downstream (unchanged) sees
-# real Hebrew Unicode. The recovered text is still in the *visual* glyph
-# order the generator drew it in -- fix_bidi_line (already used everywhere
-# below) handles that exactly like any other reversed export; nothing about
-# the ordering fix is specific to this institution.
-GLYPH_NAME_TO_HEBREW = {
-    "alef": "א", "bet": "ב", "gimel": "ג", "dalet": "ד", "he": "ה", "vav": "ו",
-    "zayin": "ז", "het": "ח", "tet": "ט", "yod": "י", "finalkaf": "ך", "kaf": "כ",
-    "lamed": "ל", "finalmem": "ם", "mem": "מ", "finalnun": "ן", "nun": "נ",
-    "samekh": "ס", "ayin": "ע", "finalpe": "ף", "pe": "פ", "finaltsadi": "ץ",
-    "tsadi": "צ", "qof": "ק", "resh": "ר", "shin": "ש", "tav": "ת",
-    # AFII-numbered names are the "official" Adobe Glyph List spelling for
-    # Hebrew letters and show up on other institutions' exports that hit the
-    # same missing-ToUnicode issue with a different glyph-naming convention.
-    "afii57664": "א", "afii57665": "ב", "afii57666": "ג", "afii57667": "ד",
-    "afii57668": "ה", "afii57669": "ו", "afii57670": "ז", "afii57671": "ח",
-    "afii57672": "ט", "afii57673": "י", "afii57674": "ך", "afii57675": "כ",
-    "afii57676": "ל", "afii57677": "ם", "afii57678": "מ", "afii57679": "ן",
-    "afii57680": "נ", "afii57681": "ס", "afii57682": "ע", "afii57683": "ף",
-    "afii57684": "פ", "afii57685": "ץ", "afii57686": "צ", "afii57687": "ק",
-    "afii57688": "ר", "afii57689": "ש", "afii57690": "ת",
-}
-# At least this many byte codes must resolve to a Hebrew letter before a font
-# is treated as recoverable -- guards against acting on some unrelated symbol
-# font whose /Differences array happens to name one coincidental glyph.
-MIN_RECOVERABLE_HEBREW_GLYPHS = 10
-
-
-def _recover_missing_hebrew_tounicode(contents: bytes) -> bytes:
-    """Returns `contents` unchanged unless it finds a simple font with a
-    Hebrew-letter-naming /Differences array and no /ToUnicode, in which case
-    it returns a copy with a synthesized /ToUnicode CMap attached to every
-    such font. Best-effort and silent: any failure here (a PDF pypdf can't
-    parse, an unexpected font structure) falls through to the original
-    bytes, and the pipeline's existing error handling takes it from there
-    exactly as it did before this function existed -- this must never be the
-    reason a previously-working upload starts failing."""
-    try:
-        from pypdf import PdfReader, PdfWriter
-        from pypdf.generic import DecodedStreamObject, NameObject
-
-        reader = PdfReader(io.BytesIO(contents))
-        patched = False
-        seen_font_ids = set()
-
-        for page in reader.pages:
-            resources = page.get("/Resources")
-            if not resources or "/Font" not in resources:
-                continue
-            for font_ref in resources["/Font"].values():
-                font = font_ref.get_object()
-                if id(font) in seen_font_ids:
-                    continue
-                seen_font_ids.add(id(font))
-                if "/ToUnicode" in font:
-                    continue
-                encoding = font.get("/Encoding")
-                differences = encoding.get_object().get("/Differences") if encoding else None
-                if not differences:
-                    continue
-
-                code_to_char = {}
-                code = None
-                for item in differences:
-                    if isinstance(item, int):
-                        code = item
-                    else:
-                        char = GLYPH_NAME_TO_HEBREW.get(str(item).lstrip("/"))
-                        if char and code is not None:
-                            code_to_char[code] = char
-                        code = (code or 0) + 1
-                if len(code_to_char) < MIN_RECOVERABLE_HEBREW_GLYPHS:
-                    continue
-
-                cmap_lines = [
-                    "/CIDInit /ProcSet findresource begin",
-                    "12 dict begin begincmap",
-                    "1 begincodespacerange <00> <FF> endcodespacerange",
-                    f"{len(code_to_char)} beginbfchar",
-                ]
-                for byte_code, char in sorted(code_to_char.items()):
-                    cmap_lines.append(f"<{byte_code:02X}> <{ord(char):04X}>")
-                cmap_lines += ["endbfchar", "endcmap",
-                               "CMapName currentdict /CMap defineresource pop", "end", "end"]
-                stream = DecodedStreamObject()
-                stream.set_data("\n".join(cmap_lines).encode("latin-1"))
-                font[NameObject("/ToUnicode")] = stream
-                patched = True
-
-        if not patched:
-            return contents
-
-        writer = PdfWriter()
-        writer.append(reader)
-        buf = io.BytesIO()
-        writer.write(buf)
-        return buf.getvalue()
-    except Exception:
-        logger.exception("Hebrew ToUnicode recovery failed; continuing with original PDF")
-        return contents
-
-
 def validate_pdf_contents(contents: bytes) -> None:
     if not contents:
         raise HTTPException(status_code=400, detail="הקובץ ריק.")
@@ -1220,7 +1105,6 @@ def _extract_records_sync(contents: bytes, strategies: list) -> list:
     strategy comes up empty on a document with no extractable text, the
     document is a scan -- reported as its own distinct error (see
     MIN_EXTRACTABLE_TEXT_CHARS)."""
-    contents = _recover_missing_hebrew_tounicode(contents)
     with pdfplumber.open(io.BytesIO(contents)) as pdf:
         for page_records in strategies:
             records = []
