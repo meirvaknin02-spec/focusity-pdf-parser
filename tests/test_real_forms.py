@@ -73,6 +73,26 @@ def test_timetable_credits_are_read_for_every_class_that_prints_them():
     assert rows == {"התנהגות ארגונית": 3, "אנגלית בסיסית": 0, "יסודות החשבונאות": 3, "קלקולוס 1": 4}
 
 
+def test_timetable_quarter_hour_blocks_keep_their_quarter_hour():
+    """Sapir draws some class blocks on HALF rows of its 30-minute grid.
+
+    Snapping each block to the nearest printed hour label once moved three of
+    these ten classes a quarter of an hour early, as perfectly valid JSON with no
+    warning - a student would simply turn up at 11:00 for a class that starts at
+    11:15. The expected file had recorded that wrong output as correct, so the
+    exact-match test above kept passing until the geometry was measured
+    independently: block edges at rows 16.52, 22.52-25.52 and 6.52-9.52.
+    """
+    rows = parse("parse-class-schedule-pdf", "sapir_timetable.pdf")
+    slots = {(r["day"], r["start_time"], r["end_time"]) for r in rows}
+    assert (3, "14:30", "16:15") in slots
+    assert (3, "19:15", "20:45") in slots
+    assert (5, "11:15", "12:45") in slots
+    # whole-row blocks are untouched by the half-row snap points
+    assert (5, "08:30", "11:00") in slots
+    assert all(r["start_time"][-2:] in ("00", "15", "30", "45") for r in rows)
+
+
 def test_grade_sheet_keeps_every_graded_course():
     rows = parse("parse-grade-sheet", "sce_grade_sheet.pdf")
     assert len(rows) == 24
