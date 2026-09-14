@@ -678,6 +678,12 @@ def split_course_name(raw: str):
     return name or str(raw or "").strip(), meeting_type, notes
 
 
+def _label_to_minutes(label: str) -> int:
+    """'09:30' -> 570. Only ever called on labels TIME_LABEL_RE already matched."""
+    hh, mm = label.split(":")
+    return int(hh) * 60 + int(mm)
+
+
 def _median(nums):
     s = sorted(nums)
     n = len(s)
@@ -762,8 +768,28 @@ def parse_class_schedule(page):
     time_col_center = _median([x for _, _, x in kept])
     grid_bottom = time_labels[-1][0] + max(row_gap, 12)
 
+    # The hour column only names whole rows (30 minutes on every export seen so
+    # far), but not every institution draws its class blocks on those lines:
+    # Sapir also puts them on HALF rows, i.e. quarter past and quarter to.
+    # Snapping such a block to the nearest *printed* label pulled it back to the
+    # label above - on the real Sapir timetable three of ten classes came out a
+    # quarter of an hour early, as valid-looking JSON with no warning. So the
+    # ladder also carries the midpoint between consecutive labels.
+    #
+    # Nearest-match is kept on purpose: a block's edge sits a couple of points
+    # off the label it belongs to, and matching by distance absorbs that offset
+    # where interpolating from label coordinates would not.
+    snap_points = []  # (y, minutes)
+    for (y_a, label_a), (y_b, label_b) in zip(time_labels, time_labels[1:]):
+        m_a, m_b = _label_to_minutes(label_a), _label_to_minutes(label_b)
+        snap_points.append((y_a, m_a))
+        if m_b > m_a:
+            snap_points.append(((y_a + y_b) / 2.0, (m_a + m_b) // 2))
+    snap_points.append((time_labels[-1][0], _label_to_minutes(time_labels[-1][1])))
+
     def snap_time(y):
-        return min(time_labels, key=lambda p: abs(p[0] - y))[1]
+        minutes = min(snap_points, key=lambda p: abs(p[0] - y))[1]
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
     # 3. Class cells: rectangles below the header, one day-column wide, sitting
     # in a day column (not the time column).
