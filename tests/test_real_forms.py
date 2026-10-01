@@ -31,6 +31,12 @@ CASES = [
      "ת.בחינה header, three-row header shifted one column, detached final letters, times missing"),
     ("parse-grade-sheet", "sce_grade_sheet.pdf", "sce_grade_sheet.json",
      "two pages, four semesters, 'השתתפ/ה' rows without a number"),
+    # Drawn rather than redacted (tools/make_english_fixtures.py), because the
+    # documents they reproduce belong to the universities that publish them.
+    ("parse-class-schedule-pdf", "celcat_timetable.pdf", "celcat_timetable.json",
+     "transposed grid: hours across the top, day names sideways, 12-hour headers, labelled cell lines"),
+    ("parse-pdf", "en_exam_list.pdf", "en_exam_list.json",
+     "English exam list: code-first lines, 12-hour times, and a duration column that must not become the start"),
 ]
 
 
@@ -97,6 +103,63 @@ def test_grade_sheet_keeps_every_graded_course():
     rows = parse("parse-grade-sheet", "sce_grade_sheet.pdf")
     assert len(rows) == 24
     assert all(isinstance(r["grade"], float) for r in rows)
+
+
+# --- English exports -------------------------------------------------------
+# Four real English timetables (Trinidad, India x2, New Zealand) all returned
+# zero rows, which looked like a language problem and was not: day names and
+# header keywords were already matched in both languages. They simply draw the
+# same week the other way round, and print a 12-hour clock.
+
+def test_transposed_grid_reads_as_one_students_week():
+    rows = parse("parse-class-schedule-pdf", "celcat_timetable.pdf")
+    slots = {(r["day"], r["start_time"], r["end_time"], r["course_name"]) for r in rows}
+    assert (1, "11:00", "12:00", "MATH 1142") in slots
+    # A class spanning two hour columns keeps its full length.
+    assert (1, "15:00", "17:00", "SOWK 6000") in slots
+    assert (3, "13:00", "14:00", "PHYS 0100") in slots
+
+
+def test_transposed_grid_keeps_the_labelled_fields():
+    rows = {r["course_name"]: r for r in parse("parse-class-schedule-pdf", "celcat_timetable.pdf")}
+    assert rows["MATH 1142"]["lecturer"] == "TYAGI, Shikhar"
+    # "Room: TLC" / "TR6" -- the value wraps onto the next line in a box this
+    # narrow, and stopping at the label's own line lost half of every room.
+    assert rows["MATH 1142"]["room"] == "TLC TR6"
+    assert rows["PHYS 0100"]["lecturer"] == "SANKARAN, Amanda"
+    assert rows["MATH 1142"]["meeting_type"] == "practice"
+    assert rows["ELFU Grammar Workshop"]["meeting_type"] == "workshop"
+
+
+def test_department_timetable_is_refused_rather_than_half_imported():
+    """One row per programme inside each day band: the drawn boxes cover
+    several programmes at once and nothing in the document says which one the
+    student is on. Reporting that no timetable was recognized is recoverable;
+    filling a week with other programmes' classes looks like it worked."""
+    with open(HERE / "fixtures" / "department_timetable.pdf", "rb") as fh:
+        response = client.post("/parse-class-schedule-pdf",
+                               files={"file": ("x.pdf", fh, "application/pdf")})
+    assert response.status_code == 422
+
+
+def test_exam_duration_column_is_not_read_as_the_start_time():
+    """"Saturday, 13 June 2026 9:00 AM 01:30" -- the 01:30 is how long the
+    exam lasts. Collecting bare times into a sorted set put it first, so every
+    row of a real Auckland timetable came out starting at its own length."""
+    rows = {r["course_name"]: r for r in parse("parse-pdf", "en_exam_list.pdf")}
+    assert rows["ACADENG 100"]["start_time"] == "09:00"
+    assert rows["ACADENG 100"]["end_time"] == "10:30"
+    # 2:00 PM is 14:00, not 02:00, and its duration still gives the end.
+    assert rows["ACCTG 102"]["start_time"] == "14:00"
+    assert rows["ACCTG 102"]["end_time"] == "16:30"
+    assert rows["PHYSICS 220"]["start_time"] == "18:00"
+
+
+def test_exam_course_name_is_the_course_not_the_whole_row():
+    """Campus, permitted materials and invigilation mode all used to end up
+    inside the course name, which made the review table unreadable."""
+    names = {r["course_name"] for r in parse("parse-pdf", "en_exam_list.pdf")}
+    assert names == {"ACADENG 100", "ACCTG 102", "COMPSCI 399", "PHYSICS 220"}
 
 
 @pytest.mark.parametrize("fixture", [c[1] for c in CASES])

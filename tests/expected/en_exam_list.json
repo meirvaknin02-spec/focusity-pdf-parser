@@ -1,0 +1,30 @@
+[
+ {
+  "course_name": "ACADENG 100",
+  "date": "2026-06-13",
+  "start_time": "09:00",
+  "end_time": "10:30",
+  "course_code": "ACADENG 100"
+ },
+ {
+  "course_name": "ACCTG 102",
+  "date": "2026-06-18",
+  "start_time": "14:00",
+  "end_time": "16:30",
+  "course_code": "ACCTG 102"
+ },
+ {
+  "course_name": "COMPSCI 399",
+  "date": "2026-06-22",
+  "start_time": "11:30",
+  "end_time": "14:30",
+  "course_code": "COMPSCI 399"
+ },
+ {
+  "course_name": "PHYSICS 220",
+  "date": "2026-06-26",
+  "start_time": "18:00",
+  "end_time": "20:00",
+  "course_code": "PHYSICS 220"
+ }
+]
