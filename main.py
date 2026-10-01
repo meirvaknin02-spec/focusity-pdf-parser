@@ -1449,7 +1449,20 @@ def parse_class_table(table) -> list:
 
 # Generous enough for a real multi-page schedule/transcript, but bounded so
 # one adversarial or pathologically slow PDF can't hang a request forever.
-PARSE_TIMEOUT_SECONDS = 30
+#
+# 30 was not generous enough. A real published exam timetable -- the
+# University of Auckland's, 9 pages and 507 exams, the file a student there
+# would actually download -- takes about 20 seconds on a developer laptop and
+# more than 30 on Render's free instance, so it returned 504 while parsing
+# perfectly in the test suite. Most of that time is the two table strategies
+# that run over every page before the text-line one succeeds.
+#
+# 55 is bounded by what the caller already waits: the web app gives the
+# parser 75 seconds (PARSER_TIMEOUT_MS in pdfParserClient.js) before it
+# aborts, so this stays below that and the student still gets a real error
+# rather than a hung dialog. Raising it does not make anyone wait longer than
+# they already would -- it only lets a slow but legitimate document finish.
+PARSE_TIMEOUT_SECONDS = 55
 
 # A digital exam-schedule/transcript export always carries at least a few
 # dozen extractable characters (headers alone exceed this). Below it, the
