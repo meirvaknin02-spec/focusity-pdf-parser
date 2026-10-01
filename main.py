@@ -1464,6 +1464,13 @@ def parse_class_table(table) -> list:
 # they already would -- it only lets a slow but legitimate document finish.
 PARSE_TIMEOUT_SECONDS = 55
 
+# How many pages a strategy may read before its emptiness is taken as proof
+# that it is the wrong strategy for this document (see _extract_records_sync).
+# Two, because every real export seen so far that needs a given strategy
+# yields its first row on page one, and the two-page fixtures here are then
+# covered end to end by the probe itself.
+PROBE_PAGES = 2
+
 # A digital exam-schedule/transcript export always carries at least a few
 # dozen extractable characters (headers alone exceed this). Below it, the
 # document is a scan/photo (image-only pages) -- text extraction is
@@ -1510,8 +1517,24 @@ def _extract_records_sync(contents: bytes, strategies: list) -> list:
     with pdfplumber.open(io.BytesIO(contents)) as pdf:
         for page_records in strategies:
             records = []
-            for page in pdf.pages:
+            for index, page in enumerate(pdf.pages):
                 records.extend(page_records(page))
+                # A strategy that has found nothing in the first few pages of
+                # a long document is not going to be the one that reads it,
+                # and table detection is expensive: on the University of
+                # Auckland's 9-page exam timetable the two table strategies
+                # cost 17 of the 20 seconds and returned nothing, which was
+                # enough to blow the request budget on Render's free CPU and
+                # turn a file that parses perfectly into a timeout.
+                #
+                # The cost of the shortcut is a document whose table starts
+                # only after a long preamble: that one now falls through to
+                # the next strategy instead. Documents of PROBE_PAGES pages
+                # or fewer -- which is nearly all of them, and every fixture
+                # here -- are unaffected, since the probe covers the whole
+                # file.
+                if not records and index + 1 >= PROBE_PAGES:
+                    break
             if records:
                 return records
         total_text = "".join((page.extract_text() or "") for page in pdf.pages)
