@@ -1,0 +1,50 @@
+[
+ {
+  "course_name": "MATH 1142",
+  "meeting_type": "practice",
+  "notes": "W12 [=8]",
+  "day": 1,
+  "start_time": "11:00",
+  "end_time": "12:00",
+  "lecturer": "TYAGI, Shikhar",
+  "room": "TLC TR6",
+  "course_code": "MATH 1142",
+  "credits": ""
+ },
+ {
+  "course_name": "SOWK 6000",
+  "meeting_type": "lecture",
+  "notes": "",
+  "day": 1,
+  "start_time": "15:00",
+  "end_time": "17:00",
+  "lecturer": "",
+  "room": "TLC TR6",
+  "course_code": "SOWK 6000",
+  "credits": ""
+ },
+ {
+  "course_name": "ELFU Grammar Workshop",
+  "meeting_type": "workshop",
+  "notes": "W5-W12 [=8]",
+  "day": 2,
+  "start_time": "09:00",
+  "end_time": "10:00",
+  "lecturer": "",
+  "room": "TLC TR6",
+  "course_code": "",
+  "credits": ""
+ },
+ {
+  "course_name": "PHYS 0100",
+  "meeting_type": "lecture",
+  "notes": "W5-W12 [=8]",
+  "day": 3,
+  "start_time": "13:00",
+  "end_time": "14:00",
+  "lecturer": "SANKARAN, Amanda",
+  "room": "TLC TR6",
+  "course_code": "PHYS 0100",
+  "credits": ""
+ }
+]

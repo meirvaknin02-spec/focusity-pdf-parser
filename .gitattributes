@@ -1,0 +1,4 @@
+# PDF fixtures must never be line-ending converted: this repo is cloned on
+# Windows with core.autocrlf=true, and a generated PDF without NUL bytes near
+# the start is auto-detected as text, which rewrites its bytes and corrupts it.
+*.pdf binary

@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import re
+from collections import Counter
 from datetime import datetime
 from typing import Optional
 
@@ -395,6 +396,14 @@ def _page_needs_reverse(text: str) -> bool:
     return fixed_score > raw_score
 
 
+# "9:00 AM", "2:00PM" -- the 12-hour clock English exam timetables print.
+EXAM_AMPM_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AaPp])\.?\s*[Mm]\.?\b")
+# "ACCTG 102*", "ACADENG 100", "COMPSCI 399" at the start of an exam line:
+# outside Israel the course code opens the row and everything after the time
+# is logistics (campus, permitted materials, invigilation mode).
+LATIN_CODE_PREFIX_RE = re.compile(r"^([A-Z]{2,8})\s?(\d{3,5}[A-Z]?)\*?(?=\s|$)")
+
+
 def parse_exam_text_lines(page) -> list:
     text = page.extract_text() or ""
     if not text.strip():
@@ -414,8 +423,38 @@ def parse_exam_text_lines(page) -> list:
         # Requiring a time as well filters out most non-exam dated lines
         # (semester headers, signature dates) at the cost of dropping the
         # rare schedule that omits times -- the safer trade for a fallback.
-        times = sorted({f"{int(h):02d}:{int(m):02d}" for h, m in TIME_RE.findall(line)
-                        if int(h) <= 23 and int(m) <= 59})
+        # The 12-hour clock needs its own pass, and not only to add 12 hours.
+        # These rows also carry a DURATION column ("02:30"), and since the
+        # bare-time branch below sorts a set, that duration sorted ahead of
+        # the real start time and became it -- every row of a real Auckland
+        # timetable came out starting at its own length. With AM/PM present,
+        # only the labelled times are clock times; a leftover bare time short
+        # enough to be a duration is used as one.
+        ampm = EXAM_AMPM_TIME_RE.findall(line)
+        if ampm:
+            times = []
+            for h, m, half in ampm:
+                h, m = int(h), int(m)
+                if 1 <= h <= 12 and m <= 59:
+                    times.append(f"{h % 12 + (12 if half.lower() == 'p' else 0):02d}:{m:02d}")
+            if len(times) == 1:
+                bare = [(int(h), int(m)) for h, m in TIME_RE.findall(line)]
+                labelled = {(int(h) % 12 + (12 if half.lower() == "p" else 0), int(m))
+                            for h, m, half in ampm}
+                # A 12-hour reading appears in `bare` as itself ("2:00"
+                # for 2:00 PM), so compare on the clock face before deciding
+                # a leftover is a duration.
+                durations = [(h, m) for h, m in bare
+                             if h <= 6 and not any(m == lm and h % 12 == lh % 12
+                                                   for lh, lm in labelled)]
+                if len(durations) == 1:
+                    sh, sm = int(times[0][:2]), int(times[0][3:])
+                    end = sh * 60 + sm + durations[0][0] * 60 + durations[0][1]
+                    if end < 24 * 60:
+                        times.append(f"{end // 60:02d}:{end % 60:02d}")
+        else:
+            times = sorted({f"{int(h):02d}:{int(m):02d}" for h, m in TIME_RE.findall(line)
+                            if int(h) <= 23 and int(m) <= 59})
         if not times:
             continue
 
@@ -437,6 +476,23 @@ def parse_exam_text_lines(page) -> list:
         if moed_match:
             moed = ("מועד " + moed_match.group(1)) if moed_match.group(1) else None
             remainder = MOED_TOKEN_RE.sub(" ", remainder)
+
+        # A line that opens with a course code names the course and nothing
+        # else does: the rest of an English exam row is campus, permitted
+        # materials and invigilation mode, all of which ended up inside the
+        # course name and made every exam import unreadable.
+        latin_code = LATIN_CODE_PREFIX_RE.match(line)
+        if latin_code:
+            code = f"{latin_code.group(1)} {latin_code.group(2)}"
+            record = {
+                "course_name": code,
+                "date": date_iso,
+                "start_time": times[0],
+                "end_time": times[1] if len(times) > 1 else None,
+                "course_code": code,
+            }
+            records.append(record)
+            continue
 
         course_code = None
         name_tokens = []
@@ -716,6 +772,317 @@ def _cell_lines(page, rect):
     return [fix_bidi_line(ln.strip()) for ln in raw.split("\n") if ln.strip()]
 
 
+# --- Transposed grid: hours across the top, days down the side ---------------
+# Everything from here to parse_class_schedule serves the layout the Israeli
+# exports do NOT use. It was added after four real English-language timetables
+# (Trinidad, India x2, New Zealand) all returned zero rows: none of them was a
+# language problem -- the day names and header keywords were already matched --
+# they simply draw the same week the other way round.
+
+TIME_AMPM_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*([ap])\.?\s*m\.?$", re.IGNORECASE)
+RANGE_DASH_WORDS = {"-", "–", "—", "to"}
+LABELLED_LINE_RE = re.compile(
+    r"^(course|module|subject|staff|lecturer|teacher|room|venue|location)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+ACTIVITY_RE = re.compile(
+    r"^(lecture|tutorial|laboratory|lab|practical|workshop|seminar|postgraduate)\b",
+    re.IGNORECASE,
+)
+ACTIVITY_TO_TYPE = {
+    "lecture": "lecture", "tutorial": "practice", "practical": "practice",
+    "laboratory": "lab", "lab": "lab", "workshop": "workshop", "seminar": "workshop",
+    "postgraduate": "",
+}
+# "MATH 1142", "SOWK6000", "CS 101A" -- what a course code looks like outside
+# Israel, where COURSE_CODE_RE's "01234567-1" shape never appears.
+LATIN_COURSE_CODE_RE = re.compile(r"^([A-Z]{2,6})\s?(\d{3,5}[A-Z]?)$")
+
+
+def _time_label_minutes(text: str) -> Optional[int]:
+    """'09:30' -> 570, '08:00AM' -> 480, '01:05 PM' -> 785; None if the word
+    is not a clock time. The 24-hour form is what the Israeli exports print
+    and the 12-hour one what the English ones do -- a header reading
+    "08:00AM" matched nothing at all before this, so every CELCAT timetable
+    lost its entire hour ladder and was rejected."""
+    t = (text or "").strip()
+    m = TIME_LABEL_RE.match(t)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        return hh * 60 + mm if hh <= 23 and mm <= 59 else None
+    m = TIME_AMPM_RE.match(t)
+    if m:
+        hh, mm, half = int(m.group(1)), int(m.group(2)), m.group(3).lower()
+        if not (1 <= hh <= 12 and mm <= 59):
+            return None
+        return (hh % 12 + (12 if half == "p" else 0)) * 60 + mm
+    return None
+
+
+def _hour_columns(words):
+    """The hour header of a transposed grid -> ([(x_center, start_min,
+    end_min)], the y the header ends at).
+
+    Two conventions appear in real exports and they mean different things. A
+    column headed by ONE time ("08:00AM") names the moment the column starts
+    and runs until the next column's time. A column headed by a RANGE
+    ("8:30 - 9:25") carries its own end, and reading that pair as two
+    separate columns would halve every class on the page. The dash printed
+    between the two halves is what distinguishes them -- it is the only
+    signal in the geometry, since the gap inside a range is not reliably
+    smaller than the gap between neighbouring columns."""
+    marks = []
+    for w in words:
+        minutes = _time_label_minutes(w["text"])
+        if minutes is not None:
+            marks.append({"x0": w["x0"], "x1": w["x1"], "top": w["top"],
+                          "bottom": w["bottom"], "min": minutes})
+    if len(marks) < 2:
+        return [], 0.0
+
+    # The header is the horizontal band holding the most time labels, so a
+    # footer print-time or a time typed inside a class cell cannot join it.
+    band = max(
+        ([m for m in marks if abs(m["top"] - anchor["top"]) <= 4] for anchor in marks),
+        key=len,
+    )
+    if len(band) < 2:
+        return [], 0.0
+    band.sort(key=lambda m: m["x0"])
+    header_top = band[0]["top"]
+    header_bottom = max(m["bottom"] for m in band)
+    dashes = [
+        (w["x0"] + w["x1"]) / 2
+        for w in words
+        if w["text"].strip().lower() in RANGE_DASH_WORDS and abs(w["top"] - header_top) <= 4
+    ]
+
+    columns = []
+    i = 0
+    while i < len(band):
+        cur = band[i]
+        nxt = band[i + 1] if i + 1 < len(band) else None
+        if nxt is not None and any(cur["x1"] <= d <= nxt["x0"] for d in dashes):
+            columns.append([(cur["x0"] + nxt["x1"]) / 2, cur["min"], nxt["min"]])
+            i += 2
+        else:
+            columns.append([(cur["x0"] + cur["x1"]) / 2, cur["min"], None])
+            i += 1
+
+    # A single-time column ends where the next one starts; the last one
+    # borrows the typical width of the ones before it.
+    for idx, col in enumerate(columns):
+        if col[2] is None:
+            if idx + 1 < len(columns):
+                col[2] = columns[idx + 1][1]
+            else:
+                widths = [c[2] - c[1] for c in columns[:idx] if c[2] is not None]
+                col[2] = col[1] + int(_median(widths) if widths else 60)
+    return [tuple(c) for c in columns if c[2] > c[1]], header_bottom
+
+
+LABEL_TO_FIELD = {
+    "course": "course_name", "module": "course_name", "subject": "course_name",
+    "staff": "lecturer", "lecturer": "lecturer", "teacher": "lecturer",
+    "room": "room", "venue": "room", "location": "room",
+}
+# How many wrapped lines a value may run to after its label. A course title
+# can be several lines ("ELFU / Writing / Workshop"); a room or a lecturer
+# cannot, and letting them run on swallowed the italic repeat of the course
+# title that CELCAT prints at the foot of the box.
+LABEL_CONTINUATION_LIMIT = {"course_name": 4, "lecturer": 3, "room": 2}
+
+
+def _read_cell_fields(lines: list) -> dict:
+    """A class cell's lines -> the record's text fields.
+
+    CELCAT and the exports that copy it label their lines ("Course: MATH
+    1142", "Staff: TYAGI, Shikhar", "Room: TLC TR6"), which is far more
+    reliable than guessing by shape the way the Hebrew path has to. The boxes
+    are narrow, so a label and its value are usually on separate lines and a
+    value wraps over several -- the label opens a field that stays open until
+    the next label or its continuation limit. When no line is labelled at
+    all, the cell falls back to the same guesswork as the Hebrew path."""
+    out = {"course_name": "", "meeting_type": "", "notes": "",
+           "lecturer": "", "room": "", "course_code": ""}
+    buckets = {"course_name": [], "lecturer": [], "room": []}
+    leftovers = []
+    current = None
+
+    for text in lines:
+        m = LABELLED_LINE_RE.match(text)
+        if m:
+            current = LABEL_TO_FIELD[m.group(1).lower()]
+            value = m.group(2).strip()
+            if value:
+                buckets[current].append(value)
+            continue
+        m = ACTIVITY_RE.match(text)
+        if m and not out["meeting_type"] and current is None:
+            out["meeting_type"] = ACTIVITY_TO_TYPE.get(m.group(1).lower(), "")
+            continue
+        if current and len(buckets[current]) < LABEL_CONTINUATION_LIMIT[current]:
+            buckets[current].append(text)
+        else:
+            leftovers.append(text)
+
+    for field, parts in buckets.items():
+        out[field] = " ".join(parts).strip()
+
+    if out["course_name"]:
+        out["notes"] = " ".join(leftovers)[:200]
+    else:
+        name, meeting_type, notes = split_course_name(" ".join(leftovers))
+        out["course_name"] = name
+        out["meeting_type"] = out["meeting_type"] or meeting_type
+        out["notes"] = notes
+
+    code = COURSE_CODE_RE.search(out["course_name"])
+    if code:
+        out["course_code"] = code.group(1)
+    elif LATIN_COURSE_CODE_RE.match(out["course_name"].strip()):
+        # The cell gives a code and no title: keep it in both fields rather
+        # than inventing a course name the document does not contain.
+        out["course_code"] = out["course_name"].strip()
+    return out
+
+
+def _looks_like_merged_rows(lines: list) -> bool:
+    """True when a box holds several stacked sub-rows rather than one class.
+
+    A department-wide timetable prints one row per programme inside the same
+    day band (IIT Bhubaneswar draws eight: CE, CSE, ECE, EE, EP, MC, ME,
+    SMMME), and the drawn box covers all of them -- so the cell comes out
+    holding the same course eight times over. Importing that gives a student
+    a week of garbage, and no amount of geometry can tell which of the eight
+    rows is theirs; the document simply does not say. Failing the page is the
+    honest outcome: the endpoint then reports that no timetable was
+    recognized instead of writing nonsense into someone's calendar.
+
+    One real class never repeats a word of its own four times."""
+    words = [w for line in lines for w in line.split()]
+    if len(words) < 8:
+        return False
+    return Counter(words).most_common(1)[0][1] >= 4
+
+
+def _parse_transposed_grid(page, words, day_marks):
+    """Hours across the top, days down the side. Returns records in exactly
+    the shape parse_class_schedule returns, or None when the page turns out
+    not to be a grid after all. Called only from parse_class_schedule."""
+    columns, header_bottom = _hour_columns(words)
+    if len(columns) < 2:
+        return None
+
+    day_rows = sorted(((y, d) for _, y, d in day_marks))
+    row_gaps = [day_rows[i + 1][0] - day_rows[i][0] for i in range(len(day_rows) - 1)]
+    row_h = _median(row_gaps) if row_gaps else 40
+    col_w = _median([columns[i + 1][0] - columns[i][0] for i in range(len(columns) - 1)]) or 40
+    # Left of the first hour column is the day-label strip, not class cells.
+    grid_left = columns[0][0] - col_w
+    # The hour header's own cells are boxes too: without this line every
+    # column heading came back as a class called "08:00AM".
+    grid_top = header_bottom
+
+    def nearest_day(yc):
+        return min(day_rows, key=lambda p: abs(p[0] - yc))[1]
+
+    # A class box is not always a `rect`. CELCAT draws its boxes with rounded
+    # corners, which pdfplumber reports as curves, and prints a grey header
+    # strip inside each box as one rect PER WRAPPED LINE -- reading rects
+    # alone turned every class into three records named after fragments of
+    # its own header ("Wks W5-", "W12 [=8]"). So both shapes are candidates,
+    # and a box that sits inside a bigger one is decoration, not a class.
+    #
+    # The size bounds drop the table's own border and any full-week banner:
+    # a real class never spans the whole week, and a box taller than a day
+    # row is that row's frame rather than one class.
+    boxes = [
+        b for b in (list(page.rects) + list(page.curves))
+        if b["height"] >= 6
+        and col_w * 0.4 <= b["width"] <= col_w * (len(columns) + 1)
+        and b["height"] <= row_h * 1.6
+        and (b["x0"] + b["x1"]) / 2 >= grid_left
+        and b["top"] >= grid_top - 2
+    ]
+    boxes.sort(key=lambda b: b["width"] * b["height"], reverse=True)
+    cells = []
+    for b in boxes:
+        if any(
+            o["x0"] - 1 <= b["x0"] and b["x1"] <= o["x1"] + 1
+            and o["top"] - 1 <= b["top"] and b["bottom"] <= o["bottom"] + 1
+            for o in cells
+        ):
+            continue
+        cells.append(b)
+
+    seen = set()
+    records = []
+    for r in cells:
+        covered = [c for c in columns if r["x0"] - col_w * 0.25 <= c[0] <= r["x1"] + col_w * 0.25]
+        if not covered:
+            continue
+        lines = _cell_lines(page, r)
+        if not lines or _looks_like_merged_rows(lines):
+            continue
+
+        start, end = covered[0][1], max(c[2] for c in covered)
+        if end <= start:
+            continue
+        fields = _read_cell_fields(lines)
+        if not fields["course_name"]:
+            continue
+
+        day = nearest_day((r["top"] + r["bottom"]) / 2)
+        start_time = f"{start // 60:02d}:{start % 60:02d}"
+        # One class is often drawn as two nested rectangles (a coloured frame
+        # inside a plain one), which would otherwise be imported twice.
+        key = (day, start_time, fields["course_name"])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        records.append({
+            "course_name": fields["course_name"],
+            "meeting_type": fields["meeting_type"],
+            "notes": fields["notes"],
+            "day": day,
+            "start_time": start_time,
+            "end_time": f"{end // 60:02d}:{end % 60:02d}",
+            "lecturer": fields["lecturer"],
+            "room": fields["room"],
+            "course_code": fields["course_code"],
+            "credits": "",
+        })
+
+    if not records or _too_many_clashes(records):
+        return None
+    records.sort(key=lambda c: (c["day"], c["start_time"]))
+    return records
+
+
+def _too_many_clashes(records: list) -> bool:
+    """True when the week this produced cannot be one person's.
+
+    Nobody attends two classes at once, so a handful of clashes means a real
+    timetable with a real clash in it, while a page full of them means the
+    layout was misread -- most often a department-wide document that stacks
+    one row per programme inside each day band, where the drawn boxes cover
+    several programmes at a time. Returning nothing then is deliberate: the
+    endpoint reports that no timetable was recognized, which is recoverable,
+    instead of filling a student's week with other programmes' classes,
+    which looks like a working import and is not."""
+    clashing = set()
+    for i, a in enumerate(records):
+        for b in records[i + 1:]:
+            if a["day"] != b["day"]:
+                continue
+            if a["start_time"] < b["end_time"] and b["start_time"] < a["end_time"]:
+                clashing.add(id(a))
+                clashing.add(id(b))
+    return len(clashing) > len(records) * 0.25
+
+
 def parse_class_schedule(page):
     """Parse a weekly-calendar-grid timetable (days across columns, half-hour
     rows, each class a bordered cell). Returns records or None if the page is
@@ -726,17 +1093,39 @@ def parse_class_schedule(page):
     generalizes across institutions that export this calendar layout."""
     words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
 
-    # 1. Day-header row: words that are day names give each day's x-center.
-    day_centers = []  # (x_center, day_idx)
+    # 1. Day labels. A day name is not always printed upright in a header
+    # row: plenty of exports write it sideways down the left edge instead.
+    # pdfplumber returns a rotated word with its characters in page order,
+    # which reads backwards ("yadnoM"), so a non-upright word is also tried
+    # reversed -- without that, three real English timetables produced zero
+    # day matches and the whole page was rejected as "not a schedule".
+    day_marks = []  # (x_center, y_center, day_idx)
     header_bottom = 0
     for w in words:
         t = fix_bidi_line(w["text"]).strip()
         day_idx = _day_index(t)
+        if day_idx is None and not w.get("upright", True):
+            day_idx = _day_index(t[::-1])
         if day_idx is not None:
-            day_centers.append(((w["x0"] + w["x1"]) / 2, day_idx))
+            day_marks.append(((w["x0"] + w["x1"]) / 2, (w["top"] + w["bottom"]) / 2, day_idx))
             header_bottom = max(header_bottom, w["bottom"])
-    if len(day_centers) < 3:
+    if len(day_marks) < 3:
         return None
+
+    # 2. Which way round is this grid? Days spread along x is the layout the
+    # rest of this function reads (days across columns, hours down the rows).
+    # Days spread along y is its transpose -- hours across the top, days down
+    # the side -- which is what CELCAT (the timetabling system behind most
+    # UK/Commonwealth university exports) and most Indian institutes print.
+    # The two need different geometry at every step, so the transpose gets
+    # its own function rather than an axis flag threaded through this one;
+    # that also means this path behaves exactly as it did before.
+    x_spread = max(m[0] for m in day_marks) - min(m[0] for m in day_marks)
+    y_spread = max(m[1] for m in day_marks) - min(m[1] for m in day_marks)
+    if y_spread > x_spread:
+        return _parse_transposed_grid(page, words, day_marks)
+
+    day_centers = [(x, d) for x, _, d in day_marks]
 
     def nearest_day(xc):
         return min(day_centers, key=lambda p: abs(p[0] - xc))[1]
@@ -746,7 +1135,7 @@ def parse_class_schedule(page):
     gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
     col_w = _median(gaps) if gaps else 80
 
-    # 2. Time labels (below the header) -> discrete y->time snap points.
+    # 3. Time labels (below the header) -> discrete y->time snap points.
     raw_labels = []  # (top, "HH:MM", x_center)
     for w in words:
         m = TIME_LABEL_RE.match(w["text"].strip())
@@ -791,7 +1180,7 @@ def parse_class_schedule(page):
         minutes = min(snap_points, key=lambda p: abs(p[0] - y))[1]
         return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
-    # 3. Class cells: rectangles below the header, one day-column wide, sitting
+    # 4. Class cells: rectangles below the header, one day-column wide, sitting
     # in a day column (not the time column).
     class_rects = []
     for r in page.rects:
@@ -810,7 +1199,7 @@ def parse_class_schedule(page):
     if not class_rects:
         return None
 
-    # 4. For each class cell, read its own lines and classify them.
+    # 5. For each class cell, read its own lines and classify them.
     #
     # The credits/weekly-hours lines ("נ"ז3:", "ש"ש1.5:") are drawn UNDER the
     # class rectangle on Sapir's export -- the box covers the class time, the
