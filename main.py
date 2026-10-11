@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import re
+import struct
 from collections import Counter
 from datetime import datetime
 from typing import Optional
@@ -18,6 +19,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 import pdfplumber
+from pdfminer.pdffont import FileUnicodeMap, PDFCIDFont, TrueTypeFont
 
 # Previously there was no logging at all: a parse failure's real cause (a
 # corrupt PDF, an unexpected pdfminer exception, ...) was visible ONLY by
@@ -28,6 +30,79 @@ import pdfplumber
 # ships everything through to stdout/stderr, so this needs no extra setup
 # to show up wherever the service's logs are viewed (locally or on Render).
 logger = logging.getLogger("focusity_pdf_parser")
+
+
+# A font's /ToUnicode CMap is what turns the glyph numbers in a PDF back into
+# letters. Some Hebrew exports ship one that only covers digits, punctuation
+# and Latin: Levinsky-Wingate's registration-system timetable (Word, the David
+# font, Type0 / Identity-H) maps glyphs 0x11-0x47 and nothing else, so every
+# Hebrew letter came out of pdfplumber as "(cid:170)", no header keyword could
+# match, and a perfectly ruled 26-class timetable was rejected as "no table".
+# The letters are not lost: the embedded TrueType font still carries its own
+# Unicode cmap, and with Identity-H a CID is the glyph id. pdfminer only reads
+# that cmap when /ToUnicode is missing altogether, so a partial one hides it.
+#
+# Glyphs the /ToUnicode leaves out are filled from the embedded cmap; a glyph
+# it does name is never second-guessed. Where the cmap gives one glyph two
+# characters, the real one beats a private-use code point: David maps its nun
+# to both U+05E0 and U+F8FF, and taking the last one dropped every נ
+# ("התנועה" became "התועה").
+_PRIVATE_USE = range(0xE000, 0xF900)
+
+
+def _embedded_cid_to_unicode(fontfile) -> dict:
+    ttf = TrueTypeFont("embedded", io.BytesIO(fontfile.get_data()))
+    if b"cmap" not in ttf.tables:
+        return {}
+    base, _length = ttf.tables[b"cmap"]
+    fp = ttf.fp
+    fp.seek(base)
+    _version, count = struct.unpack(">HH", fp.read(4))
+    subtables = [struct.unpack(">HHL", fp.read(8)) for _ in range(count)]
+    char2gid: dict = {}
+    for platform, encoding, offset in subtables:
+        # Unicode subtables only; a Mac Roman one would map bytes, not letters.
+        if not (platform == 0 or (platform == 3 and encoding in (1, 10))):
+            continue
+        fp.seek(base + offset)
+        (fmt,) = struct.unpack(">H", fp.read(2))
+        reader = getattr(ttf, f"parse_cmap_format_{fmt}", None)
+        if reader:
+            per_table: dict = {}
+            reader(fp, per_table)
+            char2gid.update(per_table)
+    gid2char: dict = {}
+    for char, gid in sorted(char2gid.items()):
+        current = gid2char.get(gid)
+        if current is None or (current in _PRIVATE_USE and char not in _PRIVATE_USE):
+            gid2char[gid] = char
+    return {gid: chr(char) for gid, char in gid2char.items() if char >= 0x20}
+
+
+_original_cid_font_init = PDFCIDFont.__init__
+
+
+def _cid_font_init_with_embedded_letters(self, rsrcmgr, spec, *args, **kwargs):
+    _original_cid_font_init(self, rsrcmgr, spec, *args, **kwargs)
+    fontfile = getattr(self, "fontfile", None)
+    if (
+        fontfile is None
+        or self.cidcoding != "Adobe-Identity"
+        or not isinstance(self.unicode_map, FileUnicodeMap)
+        # Only when CID == glyph id; an explicit CIDToGIDMap stream breaks that.
+        or not str(spec.get("CIDToGIDMap", "/'Identity'")).endswith("Identity'")
+    ):
+        return
+    try:
+        embedded = _embedded_cid_to_unicode(fontfile)
+    except Exception:  # a broken embedded font must never fail the whole PDF
+        return
+    known = self.unicode_map.cid2unichr
+    for cid, char in embedded.items():
+        known.setdefault(cid, char)
+
+
+PDFCIDFont.__init__ = _cid_font_init_with_embedded_letters
 
 app = FastAPI(title="Focusity PDF Schedule Parser")
 
@@ -90,7 +165,11 @@ HEBREW_LETTER_RE = re.compile("[֐-׿]")
 # A number keeps its inner separators: "1.5", "12:00" and "27/12/2026" are
 # one run each, so reversing the run ORDER can never turn them into "5.1",
 # "00:12" or "2026/12/27" (all three were seen on real SCE/Sapir exports).
-RUN_RE = re.compile(r"\d+(?:[.,:/]\d+)*|\D+")
+# A Latin word or dotted abbreviation is kept whole the same way:
+# Levinsky-Wingate's room "M.P.E / מעבדה 616" came back as "E.P.M" when it
+# was reversed along with the Hebrew around it.
+RUN_RE = re.compile(r"\d+(?:[.,:/]\d+)*|[A-Za-z]+(?:\.[A-Za-z]+)*|[^\dA-Za-z]+")
+KEEP_RUN_RE = re.compile(r"[\dA-Za-z]")
 # Brackets are mirror glyphs: a reversed "(קמפוס)" must come back as
 # "(קמפוס)", not ")קמפוס(" -- the shape that leaked into course names.
 MIRROR_BRACKETS = str.maketrans("()[]{}<>", ")(][}{><")
@@ -139,7 +218,7 @@ def fix_bidi_line(line: str) -> str:
         return line
     runs = RUN_RE.findall(line)
     runs.reverse()
-    return "".join(run if run[0].isdigit() else run[::-1].translate(MIRROR_BRACKETS) for run in runs)
+    return "".join(run if KEEP_RUN_RE.match(run) else run[::-1].translate(MIRROR_BRACKETS) for run in runs)
 
 
 def normalize_cell(cell, reverse: bool = False) -> str:
