@@ -12,7 +12,7 @@ import os
 import re
 import struct
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -1454,6 +1454,69 @@ def map_class_columns(header_row, reverse: bool) -> dict:
     return mapping
 
 
+# Some colleges print the whole year in one document: Levinsky-Wingate's
+# registration-system timetable is a "סמסטר א'" table and a "סמסטר ב'" table,
+# each under a full-width banner row. Read as one week, a course that runs in
+# both semesters arrived twice and semester B's classes overlapped semester
+# A's on the same days. Each record is tagged with the banner above it, and
+# the endpoint keeps only the semester that is running now.
+SEMESTER_RE = re.compile(r"סמסטר\s*(א|ב|קיץ)(?![א-ת])")
+SEMESTER_KEYS = {"א": "A", "ב": "B", "קיץ": "summer"}
+
+
+def _semester_banner(row) -> Optional[str]:
+    """A row with one filled cell naming a semester. Tried in both reading
+    directions: the banner sits above the header that decides the table's."""
+    if not row:
+        return None
+    filled = [c for c in row if normalize_cell(c)]
+    if len(filled) != 1:
+        return None
+    for reverse in (False, True):
+        match = SEMESTER_RE.search(normalize_cell(filled[0], reverse))
+        if match:
+            return SEMESTER_KEYS[match.group(1)]
+    return None
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _running_semester(today: date, present: set) -> str:
+    """Israeli academic calendar: semester A runs October to February,
+    semester B March to June. July-August is the summer semester when the
+    document has one; otherwise, and in September, the next thing a student
+    is preparing for is semester A."""
+    if today.month in (10, 11, 12, 1, 2):
+        return "A"
+    if today.month in (3, 4, 5, 6):
+        return "B"
+    if today.month in (7, 8) and "summer" in present:
+        return "summer"
+    return "A"
+
+
+def keep_running_semester(records: list) -> list:
+    """Drops the other semesters' classes from a whole-year document. A
+    record before the first banner keeps no tag and is never dropped; a
+    document with one semester, or without the running one, is returned
+    whole -- importing too much is fixable in the review table, an empty
+    import is not."""
+    tagged, last = [], None
+    for record in records:
+        semester = record.pop("_semester", None) or last
+        last = semester
+        tagged.append((record, semester))
+    present = {s for _, s in tagged if s}
+    if len(present) < 2:
+        return [r for r, _ in tagged]
+    want = _running_semester(_today(), present)
+    if want not in present:
+        return [r for r, _ in tagged]
+    return [r for r, s in tagged if s in (want, None)]
+
+
 def parse_class_table(table) -> list:
     """Row-per-class table -> the same record shape parse_class_schedule
     produces, so the frontend review table needs no translation."""
@@ -1474,10 +1537,18 @@ def parse_class_table(table) -> list:
             return ""
         return normalize_cell(row[idx], reverse)
 
+    semester = None
+    for row in table[:header_idx]:
+        semester = _semester_banner(row) or semester
+
     records = []
     last_day = None
     for row in table[header_idx + 1:]:
         if row is None or all(not normalize_cell(c) for c in row):
+            continue
+        banner = _semester_banner(row)
+        if banner:
+            semester, last_day = banner, None
             continue
 
         course_name = cell(row, "course_name")
@@ -1520,6 +1591,7 @@ def parse_class_table(table) -> list:
             "room": cell(row, "room"),
             "course_code": cell(row, "course_code"),
             "credits": credits if credits is not None else "",
+            "_semester": semester,
         })
 
     records.sort(key=lambda c: (c["day"], c["start_time"] or ""))
@@ -1740,6 +1812,7 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
     ]
 
     records = await _parse_with_timeout(contents, strategies)
+    records = keep_running_semester(records)
 
     if not records:
         raise HTTPException(

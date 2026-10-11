@@ -13,6 +13,7 @@ and save that output to tests/expected/. Never regenerate an expected file
 just to make a failing test pass; the failure is the point.
 """
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,17 @@ CASES = [
     # export carries a student's name, ID number and home address.
     ("parse-class-schedule-pdf", "partial_tounicode_timetable.pdf", "partial_tounicode_timetable.json",
      "Hebrew font whose /ToUnicode covers Latin only; letters live in the embedded cmap, nun twice"),
+    # Read on a November date (see pin_today): semester A only.
+    ("parse-class-schedule-pdf", "two_semester_timetable.pdf", "two_semester_timetable.json",
+     "the whole year in one document, a banner row above each semester's table"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def pin_today(monkeypatch):
+    """Which semester a whole-year timetable keeps depends on the date, so
+    every test reads it on the same day unless it says otherwise."""
+    monkeypatch.setattr(main, "_today", lambda: date(2026, 11, 1))
 
 
 def parse(endpoint, fixture):
@@ -121,6 +132,36 @@ def test_hebrew_letters_missing_from_tounicode_come_from_the_embedded_font():
     assert not any("(cid:" in n or "" in n for n in names)
     # A Latin abbreviation reversed along with the Hebrew around it read "E.P.M".
     assert rows[0]["room"] == "M.P.E / מעבדה 101"
+
+
+def test_whole_year_timetable_imports_only_the_running_semester(monkeypatch):
+    """Levinsky-Wingate prints semester A and B in one document. Imported as one
+    week, a course running in both came in twice and semester B's classes sat on
+    top of semester A's on the same mornings."""
+    def names_on(day):
+        monkeypatch.setattr(main, "_today", lambda: day)
+        return [r["course_name"] for r in parse("parse-class-schedule-pdf", "two_semester_timetable.pdf")]
+
+    autumn = names_on(date(2026, 11, 1))
+    assert len(autumn) == 5 and "תולדות הספורט" not in autumn
+    assert autumn.count("מבוא לתנועה ונשימה") == 1
+
+    spring = names_on(date(2027, 3, 15))
+    assert spring == ["מבוא לתנועה ונשימה", "תולדות הספורט", "מבוא לאימון"]
+
+    # No summer table in the document: in July the next semester is A.
+    assert names_on(date(2027, 7, 10)) == autumn
+
+
+def test_single_semester_documents_are_never_filtered(monkeypatch):
+    monkeypatch.setattr(main, "_today", lambda: date(2027, 3, 15))
+    assert len(parse("parse-class-schedule-pdf", "partial_tounicode_timetable.pdf")) == 5
+
+
+def test_rows_before_the_first_semester_banner_are_kept():
+    records = [{"n": 1}, {"n": 2, "_semester": "A"}, {"n": 3, "_semester": "B"}]
+    assert [r["n"] for r in main.keep_running_semester(records)] == [1, 2]
+    assert all("_semester" not in r for r in records)
 
 
 # --- English exports -------------------------------------------------------

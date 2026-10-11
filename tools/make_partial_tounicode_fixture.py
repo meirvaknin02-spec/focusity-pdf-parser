@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Builds tests/fixtures/partial_tounicode_timetable.pdf.
+"""Builds tests/fixtures/partial_tounicode_timetable.pdf and
+tests/fixtures/two_semester_timetable.pdf.
 
     pip install pymupdf fonttools     # only needed to run this script
     python tools/make_partial_tounicode_fixture.py
@@ -14,6 +15,10 @@ exports it, and the two font traps that made the real file unreadable:
     unless the parser falls back to the embedded font's own cmap.
   - That cmap gives the nun glyph a second, private-use code point (U+F8FF),
     as Windows' David does. Taking the wrong one drops every נ.
+
+two_semester_timetable.pdf is the same document the way Levinsky-Wingate
+actually prints it: the whole year, a "סמסטר א'" table and a "סמסטר ב'" table,
+each under a full-width banner row, with one course running in both.
 
 Courses, lecturers and rooms are made up. The font is David Libre (SIL Open
 Font License), not the proprietary David the real file embeds.
@@ -30,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from main import fix_bidi_line  # noqa: E402  (visual order = the parser's own inverse)
 
-OUT = ROOT / "tests" / "fixtures" / "partial_tounicode_timetable.pdf"
+FIXTURES = ROOT / "tests" / "fixtures"
 FONT = Path(r"C:/Windows/Fonts/DavidLibre-Regular.ttf")
 
 HEADER = ["יום", "משעה", "עד שעה", "קוד קורס", "שם קורס", 'ש"ש', "מרצה", "חדר"]
@@ -40,6 +45,11 @@ ROWS = [
     ["ג'", "09:30", "11:00", "12130000", "מבוא לסטטיסטיקה", "1", "ד\"ר נחום ניר", "קמפוס צפון / חדר 12"],
     ["ג'", "13:30", "15:00", "12140100", "חינוך ונוער", "1", "ברנע ענבל", "קמפוס צפון / חדר 14"],
     ["ד'", "11:30", "13:00", "13150000", "מבוא לפסיכולוגיה", "1", "ד\"ר אלון ניצן", "קמפוס צפון / חדר 15"],
+]
+ROWS_B = [
+    ["א'", "09:30", "12:00", "11110100", "מבוא לתנועה ונשימה", "2", "ד\"ר כהן נוי", "M.P.E / מעבדה 101"],
+    ["ב'", "10:00", "11:30", "21160000", "תולדות הספורט", "1", "נבון נגה", "קמפוס צפון / חדר 16"],
+    ["ה'", "08:30", "10:00", "21170100", "מבוא לאימון", "1", "ד\"ר נאור נדב", "מכון / אולם ג'"],
 ]
 # Right-to-left columns, as printed: יום is the rightmost.
 WIDTHS = [30, 42, 42, 70, 170, 28, 90, 120]
@@ -91,7 +101,8 @@ def _strip_hebrew_from_tounicode(doc: pymupdf.Document) -> int:
     return stripped
 
 
-def build() -> None:
+def build(out: Path, sections: list) -> None:
+    """`sections` is [(banner or None, rows)]; each becomes its own ruled table."""
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
     page.insert_font(fontname="dl", fontbuffer=_font_with_private_use_nun())
@@ -99,22 +110,30 @@ def build() -> None:
     right = LEFT + sum(WIDTHS)
     page.insert_text((230, 80), _visual("מערכת שעות לדוגמה"), fontname="dl", fontsize=14)
 
-    for r, cells in enumerate([HEADER] + ROWS):
-        y = TOP + r * ROW_H
-        x = right
-        for w, text in zip(WIDTHS, cells):
-            x -= w
-            page.draw_rect(pymupdf.Rect(x, y, x + w, y + ROW_H), color=(0, 0, 0), width=0.6)
-            page.insert_text((x + 3, y + 17), _visual(text), fontname="dl", fontsize=9)
+    y = TOP
+    for banner, rows in sections:
+        if banner:
+            page.draw_rect(pymupdf.Rect(LEFT, y, right, y + ROW_H), color=(0, 0, 0), width=0.6)
+            page.insert_text((LEFT + sum(WIDTHS) / 2, y + 17), _visual(banner), fontname="dl", fontsize=9)
+            y += ROW_H
+        for cells in [HEADER] + rows:
+            x = right
+            for w, text in zip(WIDTHS, cells):
+                x -= w
+                page.draw_rect(pymupdf.Rect(x, y, x + w, y + ROW_H), color=(0, 0, 0), width=0.6)
+                page.insert_text((x + 3, y + 17), _visual(text), fontname="dl", fontsize=9)
+            y += ROW_H
+        y += 2 * ROW_H
 
     # No doc.subset_fonts(): MuPDF's subsetter drops the font's cmap table,
     # and the cmap is exactly what the real export still carries.
     if not _strip_hebrew_from_tounicode(doc):
         sys.exit("no Type0 font with a /ToUnicode was written -- the fixture would not reproduce the bug")
     doc.set_metadata({})
-    doc.save(OUT, garbage=4, deflate=True)
-    print(f"wrote {OUT}")
+    doc.save(out, garbage=4, deflate=True)
+    print(f"wrote {out}")
 
 
 if __name__ == "__main__":
-    build()
+    build(FIXTURES / "partial_tounicode_timetable.pdf", [(None, ROWS)])
+    build(FIXTURES / "two_semester_timetable.pdf", [("סמסטר א'", ROWS), ("סמסטר ב'", ROWS_B)])
