@@ -37,6 +37,10 @@ CASES = [
      "transposed grid: hours across the top, day names sideways, 12-hour headers, labelled cell lines"),
     ("parse-pdf", "en_exam_list.pdf", "en_exam_list.json",
      "English exam list: code-first lines, 12-hour times, and a duration column that must not become the start"),
+    # Drawn (tools/make_partial_tounicode_fixture.py): the real Levinsky-Wingate
+    # export carries a student's name, ID number and home address.
+    ("parse-class-schedule-pdf", "partial_tounicode_timetable.pdf", "partial_tounicode_timetable.json",
+     "Hebrew font whose /ToUnicode covers Latin only; letters live in the embedded cmap, nun twice"),
 ]
 
 
@@ -103,6 +107,20 @@ def test_grade_sheet_keeps_every_graded_course():
     rows = parse("parse-grade-sheet", "sce_grade_sheet.pdf")
     assert len(rows) == 24
     assert all(isinstance(r["grade"], float) for r in rows)
+
+
+def test_hebrew_letters_missing_from_tounicode_come_from_the_embedded_font():
+    """Levinsky-Wingate's timetable names every Hebrew glyph only inside the
+    embedded font, not in /ToUnicode, so all 26 classes were rejected as "no
+    table" (every letter extracted as "(cid:N)"). The same font gives nun a
+    second, private-use code point; picking that one silently dropped every
+    נ - "התנועה" became "התועה", which still looks like a course name."""
+    rows = parse("parse-class-schedule-pdf", "partial_tounicode_timetable.pdf")
+    names = [r["course_name"] for r in rows]
+    assert names[0] == "מבוא לתנועה ונשימה"
+    assert not any("(cid:" in n or "" in n for n in names)
+    # A Latin abbreviation reversed along with the Hebrew around it read "E.P.M".
+    assert rows[0]["room"] == "M.P.E / מעבדה 101"
 
 
 # --- English exports -------------------------------------------------------

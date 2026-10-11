@@ -1,0 +1,62 @@
+[
+ {
+  "course_name": "מבוא לתנועה ונשימה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 0,
+  "start_time": "09:30",
+  "end_time": "12:00",
+  "lecturer": "ד\"ר כהן נוי",
+  "room": "M.P.E / מעבדה 101",
+  "course_code": "11110100",
+  "credits": ""
+ },
+ {
+  "course_name": "יסודות בכדורסל",
+  "meeting_type": "",
+  "notes": "",
+  "day": 0,
+  "start_time": "12:15",
+  "end_time": "14:00",
+  "lecturer": "לוין נעמה",
+  "room": "מכון / אולם ב'",
+  "course_code": "11120000",
+  "credits": ""
+ },
+ {
+  "course_name": "מבוא לסטטיסטיקה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "09:30",
+  "end_time": "11:00",
+  "lecturer": "ד\"ר נחום ניר",
+  "room": "קמפוס צפון / חדר 12",
+  "course_code": "12130000",
+  "credits": ""
+ },
+ {
+  "course_name": "חינוך ונוער",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "13:30",
+  "end_time": "15:00",
+  "lecturer": "ברנע ענבל",
+  "room": "קמפוס צפון / חדר 14",
+  "course_code": "12140100",
+  "credits": ""
+ },
+ {
+  "course_name": "מבוא לפסיכולוגיה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 3,
+  "start_time": "11:30",
+  "end_time": "13:00",
+  "lecturer": "ד\"ר אלון ניצן",
+  "room": "קמפוס צפון / חדר 15",
+  "course_code": "13150000",
+  "credits": ""
+ }
+]
