@@ -47,6 +47,10 @@ CASES = [
     # Read on a November date (see pin_today): semester A only.
     ("parse-class-schedule-pdf", "two_semester_timetable.pdf", "two_semester_timetable.json",
      "the whole year in one document, a banner row above each semester's table"),
+    # Drawn (tools/make_dotted_range_fixture.py) in the shape of a real
+    # Turkish upload that was rejected four times on 2026-10-16.
+    ("parse-class-schedule-pdf", "dotted_range_timetable.pdf", "dotted_range_timetable.json",
+     "Turkish day names, an hour column of '09.00 - 09.45' ranges, Latin codes, 'Derslik:' rooms"),
 ]
 
 
@@ -246,3 +250,15 @@ def test_fixtures_carry_no_personal_details(fixture):
     assert not re.search(r"(?<!\d)\d{9}(?!\d)", text), "a 9-digit ID number is present"
     assert not re.search(r"(?<!\d)05\d{8}(?!\d)", text), "a mobile phone number is present"
     assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text), "an e-mail address is present"
+
+
+def test_range_hour_column_ends_a_class_on_its_last_rows_printed_end():
+    """'12.00 - 12.45' then '12.45 - 13.30' run back to back while other rows
+    leave a gap: a class ends at the end printed on its last row, never at the
+    start of the row after it."""
+    rows = {r["course_name"]: r for r in parse("parse-class-schedule-pdf", "dotted_range_timetable.pdf")}
+    assert (rows["Mikrobiyoloji Uyg. A"]["start_time"], rows["Mikrobiyoloji Uyg. A"]["end_time"]) == ("12:00", "13:30")
+    assert (rows["Biyokimya II"]["start_time"], rows["Biyokimya II"]["end_time"]) == ("10:00", "11:45")
+    assert rows["Biyokimya II"]["day"] == 1  # Pazartesi = Monday
+    assert rows["Biyokimya II"]["course_code"] == "BIO2201050"
+    assert rows["Biyokimya II"]["room"] == "204"

@@ -1,0 +1,74 @@
+[
+ {
+  "course_name": "Biyokimya II",
+  "meeting_type": "",
+  "notes": "",
+  "day": 1,
+  "start_time": "10:00",
+  "end_time": "11:45",
+  "lecturer": "",
+  "room": "204",
+  "course_code": "BIO2201050",
+  "credits": ""
+ },
+ {
+  "course_name": "Anatomi I",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "09:00",
+  "end_time": "09:45",
+  "lecturer": "",
+  "room": "115",
+  "course_code": "ANA1102030",
+  "credits": ""
+ },
+ {
+  "course_name": "Fizyoloji",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "13:30",
+  "end_time": "15:15",
+  "lecturer": "",
+  "room": "204",
+  "course_code": "FZY2103070",
+  "credits": ""
+ },
+ {
+  "course_name": "Mikrobiyoloji Uyg. A",
+  "meeting_type": "",
+  "notes": "",
+  "day": 3,
+  "start_time": "12:00",
+  "end_time": "13:30",
+  "lecturer": "",
+  "room": "",
+  "course_code": "MIK2104010",
+  "credits": ""
+ },
+ {
+  "course_name": "Histoloji Laboratuvarı",
+  "meeting_type": "",
+  "notes": "",
+  "day": 4,
+  "start_time": "14:30",
+  "end_time": "17:15",
+  "lecturer": "",
+  "room": "Lab 3",
+  "course_code": "HIS2105020",
+  "credits": ""
+ },
+ {
+  "course_name": "İstatistik",
+  "meeting_type": "",
+  "notes": "",
+  "day": 5,
+  "start_time": "09:00",
+  "end_time": "11:45",
+  "lecturer": "",
+  "room": "310",
+  "course_code": "IST2106040",
+  "credits": ""
+ }
+]

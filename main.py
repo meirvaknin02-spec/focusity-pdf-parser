@@ -757,6 +757,10 @@ DAY_NAME_TO_IDX = {
     "sunday": 0, "sun": 0, "monday": 1, "mon": 1, "tuesday": 2, "tue": 2,
     "wednesday": 3, "wed": 3, "thursday": 4, "thu": 4, "friday": 5, "fri": 5,
     "saturday": 6, "sat": 6,
+    # Turkish, found 2026-10-16 on a real upload that matched no day at all.
+    # Python lowers "SALI" to "sali" (dotted i), so both spellings are kept.
+    "pazar": 0, "pazartesi": 1, "salı": 2, "sali": 2, "çarşamba": 3, "carsamba": 3,
+    "perşembe": 4, "persembe": 4, "cuma": 5, "cumartesi": 6,
 }
 
 
@@ -811,6 +815,69 @@ def split_course_name(raw: str):
             break
     name = re.sub(r"[\s\-–—]+$", "", name).strip()
     return name or str(raw or "").strip(), meeting_type, notes
+
+
+# --- Hour column printed as ranges ------------------------------------------
+# Found 2026-10-16 (import_attempts 57cb296c, a Turkish pharmacy timetable,
+# rejected four times): the hour column said "09.00 - 09.45" on every row.
+# The ladder below only knows bare "09:00" labels, one per row boundary, so a
+# dot matched nothing; with a colon it would have been worse -- both ends of
+# every range would join the ladder at the same height. A range row also
+# means something different: the class ends at the END printed on the last
+# row it covers, which on that file is not the next row's start (12.00 -
+# 12.45 runs straight into 12.45 - 13.30, other rows leave a 15-minute gap).
+
+CLOCK_WORD_RE = re.compile(r"^(\d{1,2})[:.](\d{2})$")
+RANGE_WORD_RE = re.compile(r"^(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})$")
+DASH_WORDS = {"-", "–", "—"}
+# Whole-line forms only, so a Hebrew cell can never match them.
+LATIN_CODE_LINE_RE = re.compile(r"^[A-Z]{2,6}\s?\d{3,8}[A-Z]?$")
+ROOM_LINE_RE = re.compile(
+    r"^(?:room|venue|location|classroom|derslik|salon|aula|sala|salle|raum)\s*:\s*(.+)$", re.IGNORECASE)
+
+
+def _clock(hh, mm) -> Optional[int]:
+    hh, mm = int(hh), int(mm)
+    return hh * 60 + mm if hh <= 23 and mm <= 59 else None
+
+
+def _range_rows(words, header_bottom, day_centers, col_w):
+    """([(y_center, start_min, end_min)] for every hour-column range label in
+    page order, the column's x), or ([], None) when the page has no such
+    column. A range written INSIDE a class cell is not a label, so anything
+    sitting in a day column is ignored -- only the margin column counts."""
+    lines = {}
+    for w in words:
+        if w["top"] > header_bottom - 6:
+            lines.setdefault(round(w["top"]), []).append(w)
+    found = []
+    for line in lines.values():
+        line.sort(key=lambda w: w["x0"])
+        texts = [w["text"].strip() for w in line]
+        for i, w in enumerate(line):
+            m = RANGE_WORD_RE.match(texts[i])
+            if m:
+                pair = (_clock(m.group(1), m.group(2)), _clock(m.group(3), m.group(4)))
+                x0, x1 = w["x0"], w["x1"]
+            elif (CLOCK_WORD_RE.match(texts[i]) and i + 2 < len(line)
+                  and texts[i + 1] in DASH_WORDS and CLOCK_WORD_RE.match(texts[i + 2])):
+                a, b = CLOCK_WORD_RE.match(texts[i]), CLOCK_WORD_RE.match(texts[i + 2])
+                pair = (_clock(*a.groups()), _clock(*b.groups()))
+                x0, x1 = w["x0"], line[i + 2]["x1"]
+            else:
+                continue
+            start, end = pair
+            if start is None or end is None or end <= start:
+                continue
+            xc = (x0 + x1) / 2
+            if min(abs(xc - c) for c, _ in day_centers) < col_w * 0.5:
+                continue
+            found.append(((w["top"] + w["bottom"]) / 2, start, end, xc))
+    if len(found) < 2:
+        return [], None
+    col = _median([xc for *_, xc in found])
+    rows = sorted((y, s, e) for y, s, e, xc in found if abs(xc - col) < col_w * 0.5)
+    return (rows, col) if len(rows) >= 2 else ([], None)
 
 
 def _label_to_minutes(label: str) -> int:
@@ -1214,50 +1281,72 @@ def parse_class_schedule(page):
     gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
     col_w = _median(gaps) if gaps else 80
 
-    # 3. Time labels (below the header) -> discrete y->time snap points.
-    raw_labels = []  # (top, "HH:MM", x_center)
-    for w in words:
-        m = TIME_LABEL_RE.match(w["text"].strip())
-        if m and w["top"] > header_bottom - 6:
-            hh, mm = int(m.group(1)), int(m.group(2))
-            if hh <= 23 and mm <= 59:
-                raw_labels.append((w["top"], f"{hh:02d}:{mm:02d}", (w["x0"] + w["x1"]) / 2))
-    if len(raw_labels) < 2:
-        return None
-    raw_labels.sort()
-    # Keep only the main regularly-spaced ladder: drop outliers like the footer
-    # print-time ("שעת הדפסה : 19:16") that sits far below the last real row.
-    row_gap = _median([raw_labels[i + 1][0] - raw_labels[i][0] for i in range(len(raw_labels) - 1)])
-    kept = [raw_labels[0]]
-    for prev, cur in zip(raw_labels, raw_labels[1:]):
-        if cur[0] - kept[-1][0] <= max(row_gap * 3, 30):
-            kept.append(cur)
-    time_labels = [(t, s) for t, s, _ in kept]
-    time_col_center = _median([x for _, _, x in kept])
-    grid_bottom = time_labels[-1][0] + max(row_gap, 12)
+    # 3. The hour column. Printed as ranges ("09.00 - 09.45") each row names
+    # its own start and end; printed as bare times it is a ladder of row
+    # boundaries. See _range_rows.
+    range_rows, range_col = _range_rows(words, header_bottom, day_centers, col_w)
+    if range_rows:
+        ys = [y for y, _, _ in range_rows]
+        row_gap = _median([b - a for a, b in zip(ys, ys[1:])])
+        time_col_center = range_col
+        grid_bottom = ys[-1] + max(row_gap, 12)
 
-    # The hour column only names whole rows (30 minutes on every export seen so
-    # far), but not every institution draws its class blocks on those lines:
-    # Sapir also puts them on HALF rows, i.e. quarter past and quarter to.
-    # Snapping such a block to the nearest *printed* label pulled it back to the
-    # label above - on the real Sapir timetable three of ten classes came out a
-    # quarter of an hour early, as valid-looking JSON with no warning. So the
-    # ladder also carries the midpoint between consecutive labels.
-    #
-    # Nearest-match is kept on purpose: a block's edge sits a couple of points
-    # off the label it belongs to, and matching by distance absorbs that offset
-    # where interpolating from label coordinates would not.
-    snap_points = []  # (y, minutes)
-    for (y_a, label_a), (y_b, label_b) in zip(time_labels, time_labels[1:]):
-        m_a, m_b = _label_to_minutes(label_a), _label_to_minutes(label_b)
-        snap_points.append((y_a, m_a))
-        if m_b > m_a:
-            snap_points.append(((y_a + y_b) / 2.0, (m_a + m_b) // 2))
-    snap_points.append((time_labels[-1][0], _label_to_minutes(time_labels[-1][1])))
+        def class_times(rect):
+            # The rows whose label sits inside the cell: it starts with the
+            # first one's start and ends with the last one's end.
+            covered = [(s, e) for y, s, e in range_rows if rect["top"] - 1 <= y <= rect["bottom"] + 1]
+            if not covered:
+                return None
+            return (f"{covered[0][0] // 60:02d}:{covered[0][0] % 60:02d}",
+                    f"{covered[-1][1] // 60:02d}:{covered[-1][1] % 60:02d}")
+    else:
+        # 3. Time labels (below the header) -> discrete y->time snap points.
+        raw_labels = []  # (top, "HH:MM", x_center)
+        for w in words:
+            m = TIME_LABEL_RE.match(w["text"].strip())
+            if m and w["top"] > header_bottom - 6:
+                hh, mm = int(m.group(1)), int(m.group(2))
+                if hh <= 23 and mm <= 59:
+                    raw_labels.append((w["top"], f"{hh:02d}:{mm:02d}", (w["x0"] + w["x1"]) / 2))
+        if len(raw_labels) < 2:
+            return None
+        raw_labels.sort()
+        # Keep only the main regularly-spaced ladder: drop outliers like the footer
+        # print-time ("שעת הדפסה : 19:16") that sits far below the last real row.
+        row_gap = _median([raw_labels[i + 1][0] - raw_labels[i][0] for i in range(len(raw_labels) - 1)])
+        kept = [raw_labels[0]]
+        for prev, cur in zip(raw_labels, raw_labels[1:]):
+            if cur[0] - kept[-1][0] <= max(row_gap * 3, 30):
+                kept.append(cur)
+        time_labels = [(t, s) for t, s, _ in kept]
+        time_col_center = _median([x for _, _, x in kept])
+        grid_bottom = time_labels[-1][0] + max(row_gap, 12)
 
-    def snap_time(y):
-        minutes = min(snap_points, key=lambda p: abs(p[0] - y))[1]
-        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+        # The hour column only names whole rows (30 minutes on every export seen so
+        # far), but not every institution draws its class blocks on those lines:
+        # Sapir also puts them on HALF rows, i.e. quarter past and quarter to.
+        # Snapping such a block to the nearest *printed* label pulled it back to the
+        # label above - on the real Sapir timetable three of ten classes came out a
+        # quarter of an hour early, as valid-looking JSON with no warning. So the
+        # ladder also carries the midpoint between consecutive labels.
+        #
+        # Nearest-match is kept on purpose: a block's edge sits a couple of points
+        # off the label it belongs to, and matching by distance absorbs that offset
+        # where interpolating from label coordinates would not.
+        snap_points = []  # (y, minutes)
+        for (y_a, label_a), (y_b, label_b) in zip(time_labels, time_labels[1:]):
+            m_a, m_b = _label_to_minutes(label_a), _label_to_minutes(label_b)
+            snap_points.append((y_a, m_a))
+            if m_b > m_a:
+                snap_points.append(((y_a + y_b) / 2.0, (m_a + m_b) // 2))
+        snap_points.append((time_labels[-1][0], _label_to_minutes(time_labels[-1][1])))
+
+        def snap_time(y):
+            minutes = min(snap_points, key=lambda p: abs(p[0] - y))[1]
+            return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+        def class_times(rect):
+            return snap_time(rect["top"]), snap_time(rect["bottom"])
 
     # 4. Class cells: rectangles below the header, one day-column wide, sitting
     # in a day column (not the time column).
@@ -1305,8 +1394,10 @@ def parse_class_schedule(page):
             continue
         lines = lines + band_below(r, day)
 
-        start_time = snap_time(r["top"])
-        end_time = snap_time(r["bottom"])
+        times = class_times(r)
+        if times is None:
+            continue
+        start_time, end_time = times
 
         lecturer = ""
         room_num = ""
@@ -1322,6 +1413,18 @@ def parse_class_schedule(page):
             code_m = COURSE_CODE_RE.search(text)
             if code_m and not course_code:
                 course_code = code_m.group(1)
+                continue
+            # Outside Israel the code is a line of its own ("ECF4145900") and
+            # the room is labelled ("Derslik: 1003", "Room: B12"); both used
+            # to be glued onto the course name.
+            if LATIN_CODE_LINE_RE.match(text):
+                if not course_code:
+                    course_code = text
+                continue
+            room_m = ROOM_LINE_RE.match(text)
+            if room_m:
+                if not room_num:
+                    room_num = room_m.group(1).strip()
                 continue
             if METADATA_RE.search(text):
                 # "נ"ז3:" as printed, or ":3ז"נ" when a generator flipped it.
