@@ -32,6 +32,8 @@ CASES = [
      "ת.בחינה header, three-row header shifted one column, detached final letters, times missing"),
     ("parse-grade-sheet", "sce_grade_sheet.pdf", "sce_grade_sheet.json",
      "two pages, four semesters, 'השתתפ/ה' rows without a number"),
+    ("parse-class-schedule-pdf", "sce_weekly_timetable.pdf", "sce_weekly_timetable.json",
+     "Michlol weekly print: name column headed 'שעור' (no yod), the name one column left of its header"),
     # Drawn rather than redacted (tools/make_english_fixtures.py), because the
     # documents they reproduce belong to the universities that publish them.
     ("parse-class-schedule-pdf", "celcat_timetable.pdf", "celcat_timetable.json",
@@ -112,6 +114,18 @@ def test_timetable_quarter_hour_blocks_keep_their_quarter_hour():
     # whole-row blocks are untouched by the half-row snap points
     assert (5, "08:30", "11:00") in slots
     assert all(r["start_time"][-2:] in ("00", "15", "30", "45") for r in rows)
+
+
+def test_sce_weekly_print_reads_every_class_with_its_name():
+    """SCE's Michlol "מערכת מפגשים לתקופה" print was rejected outright: its
+    name column says "שעור" (no yod), and the name cell spans a blank-headed
+    column to the left of that header, so even a matched header pointed at
+    an empty column and every row was dropped as nameless."""
+    rows = parse("parse-class-schedule-pdf", "sce_weekly_timetable.pdf")
+    assert len(rows) == 11
+    assert all(r["course_name"] and r["course_code"] for r in rows)
+    assert rows[0]["course_name"] == "הנדסת איכות"
+    assert (rows[0]["day"], rows[0]["start_time"], rows[0]["end_time"]) == (0, "08:00", "11:00")
 
 
 def test_grade_sheet_keeps_every_graded_course():

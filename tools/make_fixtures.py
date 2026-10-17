@@ -31,11 +31,14 @@ PII = {
     "sce_exam_schedule.pdf": {":315057026", "םהרבא", "ריאמ", "ןינקוו"},
     "sce_grade_sheet.pdf": {"315057026", "םהרבא", "ריאמ", "ןינקוו", "8725555", "12/10", "ינוקרי",
                             "סומע", "Meirva@ac.sce.ac.il", "0558874076"},
+    "sce_weekly_timetable.pdf": {"315057026", "םהרבא", "ריאמ", "ןינקוו", "8725555", "12/10", "ינוקרי",
+                                 "סומע", "Meirva@ac.sce.ac.il", "0558874076"},
 }
 SOURCES = {
     "sapir_timetable.pdf": "schedule.pdf",
     "sce_exam_schedule.pdf": "exams.pdf",
     "sce_grade_sheet.pdf": "grades.pdf",
+    "sce_weekly_timetable.pdf": "weekly.pdf",
 }
 # Personal details only ever sit in the header block. Matching whole words
 # inside that band keeps the street number "91" from taking room "9102" with it.
@@ -53,6 +56,10 @@ def build(src_dir: Path):
     OUT.mkdir(parents=True, exist_ok=True)
     for name, src_name in SOURCES.items():
         src = src_dir / src_name
+        # Only the originals at hand are rebuilt; the others keep their bytes.
+        if not src.exists():
+            print("skipped", name, "(no", src_name, "in", src_dir, ")")
+            continue
         doc = pymupdf.open(src)
         with pdfplumber.open(src) as plumber:
             for pno, ppage in enumerate(plumber.pages):

@@ -1398,7 +1398,8 @@ CLASS_FIELD_KEYWORDS = {
     # course_code before course_name: course_name's generic "שיעור"/"קורס"
     # fallbacks are substrings of "קוד שיעור"/"קוד קורס".
     "course_code": ["קוד שיעור", "קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
-    "course_name": ["שם שיעור", "שם השיעור", "שם שעור", "שם הקורס", "שם קורס", "שם מקצוע", "מקצוע", "שיעור", "קורס",
+    # Bare "שעור" (no yod) is how SCE's Michlol weekly print view heads it.
+    "course_name": ["שם שיעור", "שם השיעור", "שם שעור", "שם הקורס", "שם קורס", "שם מקצוע", "מקצוע", "שיעור", "שעור", "קורס",
                     "course name", "course title", "subject", "course"],
     "lecturer": ["מרצה", "lecturer", "instructor", "teacher"],
     "room": ["חדר", "כיתה", "אולם", "מיקום", "בניין", "room", "hall", "location", "classroom", "building"],
@@ -1531,10 +1532,27 @@ def parse_class_table(table) -> list:
     if "course_name" not in mapping or "day" not in mapping or "start_time" not in mapping:
         return []
 
+    header = table[header_idx]
+    mapped_columns = set(mapping.values())
+
     def cell(row, field):
         idx = mapping.get(field)
         if idx is None or idx >= len(row):
             return ""
+        # A value cell drawn wider than its header cell: pdfplumber puts the
+        # text in the cell's leftmost column and None in the columns it
+        # covers. SCE's Michlol weekly print view heads the course name
+        # "שעור" over the right half of a two-column cell whose left half
+        # has a blank header, so every name sat one column to the left of
+        # its header and the whole table read as nameless rows. Borrowed
+        # only from a blank-headed column no other field owns.
+        if row[idx] is None:
+            left = idx - 1
+            while left >= 0 and row[left] is None:
+                left -= 1
+            if (left >= 0 and left not in mapped_columns
+                    and not normalize_cell(header[left] if left < len(header) else None)):
+                return normalize_cell(row[left], reverse)
         return normalize_cell(row[idx], reverse)
 
     semester = None
