@@ -51,6 +51,10 @@ CASES = [
     # Turkish upload that was rejected four times on 2026-10-16.
     ("parse-class-schedule-pdf", "dotted_range_timetable.pdf", "dotted_range_timetable.json",
      "Turkish day names, an hour column of '09.00 - 09.45' ranges, Latin codes, 'Derslik:' rooms"),
+    # Drawn (tools/make_semester_pages_fixture.py) in the shape of a real
+    # registration print rejected six times on 2026-10-23.
+    ("parse-class-schedule-pdf", "semester_pages_timetable.pdf", "semester_pages_timetable.json",
+     "one page per semester named in the heading, a 'שעות' column holding the time range"),
 ]
 
 
@@ -250,6 +254,22 @@ def test_fixtures_carry_no_personal_details(fixture):
     assert not re.search(r"(?<!\d)\d{9}(?!\d)", text), "a 9-digit ID number is present"
     assert not re.search(r"(?<!\d)05\d{8}(?!\d)", text), "a mobile phone number is present"
     assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text), "an e-mail address is present"
+
+
+def test_registration_print_with_a_range_hours_column_and_a_page_per_semester(monkeypatch):
+    """A student uploaded this print six times and got "no timetable" every
+    time: its "שעות" column holds "17:00 -19:15" (read as weekly hours, so no
+    start time), and "סוג מקצוע" sits before "שם הקורס", so courses would have
+    been named after their type. Each semester is its own page, named only in
+    the heading."""
+    rows = parse("parse-class-schedule-pdf", "semester_pages_timetable.pdf")
+    assert [r["course_name"] for r in rows] == ["מבוא לכלכלה", "סדנת כתיבה", "יסודות החשבונאות", "סטטיסטיקה"]
+    assert (rows[0]["day"], rows[0]["start_time"], rows[0]["end_time"]) == (0, "17:00", "19:15")
+    assert rows[0]["room"] == "זום"
+
+    monkeypatch.setattr(main, "_today", lambda: date(2027, 3, 15))
+    assert [r["course_name"] for r in parse("parse-class-schedule-pdf", "semester_pages_timetable.pdf")] == [
+        "שיווק דיגיטלי", "עולם העבודה"]
 
 
 def test_range_hour_column_ends_a_class_on_its_last_rows_printed_end():
