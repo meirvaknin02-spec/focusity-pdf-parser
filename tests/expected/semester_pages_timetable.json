@@ -1,0 +1,50 @@
+[
+ {
+  "course_name": "מבוא לכלכלה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 0,
+  "start_time": "17:00",
+  "end_time": "19:15",
+  "lecturer": "ד\"ר כהן",
+  "room": "זום",
+  "course_code": "",
+  "credits": 3.0
+ },
+ {
+  "course_name": "סדנת כתיבה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "15:00",
+  "end_time": "16:30",
+  "lecturer": "ד\"ר לוי",
+  "room": "302",
+  "course_code": "",
+  "credits": ""
+ },
+ {
+  "course_name": "יסודות החשבונאות",
+  "meeting_type": "",
+  "notes": "",
+  "day": 2,
+  "start_time": "16:45",
+  "end_time": "18:15",
+  "lecturer": "פרופ' מזרחי",
+  "room": "253",
+  "course_code": "",
+  "credits": 2.0
+ },
+ {
+  "course_name": "סטטיסטיקה",
+  "meeting_type": "",
+  "notes": "",
+  "day": 5,
+  "start_time": "08:15",
+  "end_time": "13:00",
+  "lecturer": "ד\"ר אברהם",
+  "room": "512",
+  "course_code": "",
+  "credits": 3.0
+ }
+]

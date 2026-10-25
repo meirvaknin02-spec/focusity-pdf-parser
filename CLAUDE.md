@@ -31,6 +31,8 @@ fixture contains an ID number, mobile number or email. Never regenerate an expec
 make a test pass -- check the real document (or its geometry) first. CI runs pytest on every push.
 
 ## Current state (2026-10-21)
-`main` = `4471de7`: SCE weekly print timetable, Sapir quarter-hour blocks, missing-ToUnicode Hebrew
-fonts and dotted hour ranges are handled. Known gap: University of Haifa elective-list PDFs are
+`main`: SCE weekly print timetable, Sapir quarter-hour blocks, missing-ToUnicode Hebrew
+fonts and dotted hour ranges are handled. Since 2026-10-25 also registration prints with one page
+per semester (semester named in the page heading), a "שעות" column holding the time range, and
+several course-ish headers (the most specific keyword wins, not the leftmost column). Known gap: University of Haifa elective-list PDFs are
 still rejected (no strategy for that table shape).

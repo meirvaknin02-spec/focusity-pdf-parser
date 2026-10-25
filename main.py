@@ -1505,7 +1505,9 @@ CLASS_FIELD_KEYWORDS = {
     "course_name": ["שם שיעור", "שם השיעור", "שם שעור", "שם הקורס", "שם קורס", "שם מקצוע", "מקצוע", "שיעור", "שעור", "קורס",
                     "course name", "course title", "subject", "course"],
     "lecturer": ["מרצה", "lecturer", "instructor", "teacher"],
-    "room": ["חדר", "כיתה", "אולם", "מיקום", "בניין", "room", "hall", "location", "classroom", "building"],
+    # "מקום" is how the iTextSharp registration print (M.A. timetable, one
+    # page per semester) heads its room column ("253", "זום").
+    "room": ["חדר", "כיתה", "אולם", "מיקום", "מקום", "בניין", "room", "hall", "location", "classroom", "building"],
 }
 
 # Single-letter day cells ("א".."ו", "ש" for Saturday) -- how the SCE table
@@ -1549,13 +1551,48 @@ def detect_class_header_row(table):
     return best_idx, best_reverse
 
 
+def _class_keyword_rank(field: str, header_cell: str) -> int:
+    """Position of the first keyword of `field` found in the cell. The lists
+    run specific -> generic, so a lower rank is the better claim."""
+    lowered = header_cell.lower()
+    for rank, keyword in enumerate(CLASS_FIELD_KEYWORDS[field]):
+        if keyword in lowered:
+            return rank
+    return len(CLASS_FIELD_KEYWORDS[field])
+
+
 def map_class_columns(header_row, reverse: bool) -> dict:
-    mapping = {}
+    """When several columns match one field, the most specific keyword wins,
+    not the leftmost column: a registration print with "סוג מקצוע | מרצה |
+    שם הקורס | קורס" put the subject TYPE column (generic "מקצוע") first, so
+    every course came out named after its type, and "קורס" (the course
+    number) would have been next in line ahead of "שם הקורס"."""
+    best = {}
     for idx, raw_cell in enumerate(header_row):
-        field = match_class_field(normalize_cell(raw_cell, reverse))
-        if field and field not in mapping:
-            mapping[field] = idx
-    return mapping
+        text = normalize_cell(raw_cell, reverse)
+        field = match_class_field(text)
+        if not field:
+            continue
+        rank = _class_keyword_rank(field, text)
+        if field not in best or rank < best[field][0]:
+            best[field] = (rank, idx)
+    return {field: idx for field, (rank, idx) in best.items()}
+
+
+def _promote_hours_range_column(table, header_idx, mapping, reverse) -> None:
+    """A "שעות" column is normally weekly hours (SCE's ש"ש) and mapped as
+    `hours`, which the record drops. Some prints use that same word for the
+    meeting's time RANGE ("17:00 -19:15") and have no other time column, so
+    the table was rejected for having no start time. When most filled cells
+    of that column are ranges, it is the time column."""
+    if "start_time" in mapping or "hours" not in mapping:
+        return
+    idx = mapping["hours"]
+    values = [normalize_cell(row[idx], reverse) for row in table[header_idx + 1:]
+              if row and idx < len(row) and normalize_cell(row[idx], reverse)]
+    ranges = sum(1 for v in values if extract_time_range(v)[0])
+    if values and ranges * 2 > len(values):
+        mapping["start_time"] = mapping.pop("hours")
 
 
 # Some colleges print the whole year in one document: Levinsky-Wingate's
@@ -1580,6 +1617,23 @@ def _semester_banner(row) -> Optional[str]:
         match = SEMESTER_RE.search(normalize_cell(filled[0], reverse))
         if match:
             return SEMESTER_KEYS[match.group(1)]
+    return None
+
+
+# "סמסטר : א'" in a page heading, outside any table. "ק" is how the same
+# print abbreviates the summer semester.
+PAGE_SEMESTER_RE = re.compile(r"סמסטר\s*:?\s*(א|ב|קיץ|ק)['׳]?(?![א-ת])")
+PAGE_SEMESTER_KEYS = {"א": "A", "ב": "B", "קיץ": "summer", "ק": "summer"}
+
+
+def page_semester(page) -> Optional[str]:
+    """The semester a page's heading names, or None. Read in both
+    directions, like the banner, since the heading's direction is unknown."""
+    for line in (page.extract_text() or "").split("\n"):
+        for text in (line, fix_bidi_line(line)):
+            match = PAGE_SEMESTER_RE.search(text)
+            if match:
+                return PAGE_SEMESTER_KEYS[match.group(1)]
     return None
 
 
@@ -1621,15 +1675,18 @@ def keep_running_semester(records: list) -> list:
     return [r for r, s in tagged if s in (want, None)]
 
 
-def parse_class_table(table) -> list:
+def parse_class_table(table, page_semester: Optional[str] = None) -> list:
     """Row-per-class table -> the same record shape parse_class_schedule
-    produces, so the frontend review table needs no translation."""
+    produces, so the frontend review table needs no translation.
+    `page_semester` is the semester named in the page heading, for prints
+    that put each semester on its own page instead of a banner row."""
     if not table:
         return []
     header_idx, reverse = detect_class_header_row(table)
     if header_idx == -1:
         return []
     mapping = map_class_columns(table[header_idx], reverse)
+    _promote_hours_range_column(table, header_idx, mapping, reverse)
     # Without a day and a start time this is some other course table (an
     # exam schedule, a transcript), not a weekly class schedule.
     if "course_name" not in mapping or "day" not in mapping or "start_time" not in mapping:
@@ -1658,7 +1715,7 @@ def parse_class_table(table) -> list:
                 return normalize_cell(row[left], reverse)
         return normalize_cell(row[idx], reverse)
 
-    semester = None
+    semester = page_semester
     for row in table[:header_idx]:
         semester = _semester_banner(row) or semester
 
@@ -1685,8 +1742,14 @@ def parse_class_table(table) -> list:
             continue
         last_day = day
 
-        start_time = normalize_time(cell(row, "start_time"))
+        start_raw = cell(row, "start_time")
+        start_time = normalize_time(start_raw)
         end_time = normalize_time(cell(row, "end_time"))
+        # One column holding the whole range ("17:00 -19:15").
+        if "end_time" not in mapping:
+            range_start, range_end = extract_time_range(start_raw)
+            if range_start:
+                start_time, end_time = range_start, range_end
         # Same RTL-flip safety as parse_table: classes never span midnight,
         # so start > end is always the flipped case, never a real range.
         if start_time and end_time and start_time > end_time:
@@ -1928,8 +1991,9 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
     # non-empty layer's records are used -- see _extract_records_sync.
     strategies = [
         lambda page: parse_class_schedule(page) or [],
-        lambda page: [r for table in page.extract_tables() for r in parse_class_table(table)],
-        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS) for r in parse_class_table(table)],
+        lambda page: [r for table in page.extract_tables() for r in parse_class_table(table, page_semester(page))],
+        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS)
+                      for r in parse_class_table(table, page_semester(page))],
     ]
 
     records = await _parse_with_timeout(contents, strategies)
