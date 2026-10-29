@@ -138,6 +138,12 @@ FIELD_KEYWORDS = {
     # silently never extracted for any real PDF with a "קוד קורס" column)
     # before this field was moved here.
     "course_code": ["קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
+    # The name of the sitting itself ("MINOR TEST - 1"), for test-series
+    # schedules where every row covers several subjects. Found 2026-10-29 on
+    # an Indian JEE coaching schedule: without it the "Subject" column won and
+    # all 17 tests were imported as "Physics". English only on purpose -- a
+    # Hebrew "שם הבחינה" header names the course, not a sitting.
+    "exam_title": ["test name", "exam name", "test type", "exam type", "paper name"],
     # "שם שיעור" (SCE college's own header wording, confirmed against a real
     # exam-schedule PDF) must stay a full two-word phrase, not a bare
     # "שיעור" -- that would also match "קוד שיעור" (the course-code column)
@@ -153,7 +159,8 @@ FIELD_KEYWORDS = {
     # end_time before start_time: "time" (start_time's generic fallback) is
     # a substring of "end time", the same trap as שעה inside "עד שעה".
     "end_time": ["עד שעה", "שעת סיום", "שעה עד", "סיום", "end time", "until", "finish"],
-    "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה", "start time", "start", "from", "time", "hour"],
+    # "timing" because "Test Timings" does not contain "time".
+    "start_time": ["משעה", "שעת התחלה", "שעה מ", "שעה", "start time", "start", "from", "time", "timing", "hour"],
     "room": ["חדר", "אולם", "מיקום", "בניין", "room", "hall", "location", "building", "classroom"],
     "moed": ["מועד", "moed"],
 }
@@ -281,6 +288,17 @@ def normalize_time(raw: str) -> Optional[str]:
     return f"{hour:02d}:{minute:02d}"
 
 
+# A 12-hour clock reading, with or without minutes: "1 PM", "10:30am".
+HOUR_AMPM_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?\s*[Mm]\b")
+
+
+def _ampm_clock(hour, minute, half) -> Optional[str]:
+    hour, minute = int(hour), int(minute or 0)
+    if not 1 <= hour <= 12 or minute > 59:
+        return None
+    return f"{hour % 12 + (12 if half.lower() == 'p' else 0):02d}:{minute:02d}"
+
+
 def extract_time_range(raw: str):
     match = TIME_RANGE_RE.search(raw)
     if not match:
@@ -365,7 +383,7 @@ def parse_table(table) -> list:
     if header_idx == -1:
         return []
     mapping = map_columns(table[header_idx], reverse)
-    if "course_name" not in mapping or "date" not in mapping:
+    if ("course_name" not in mapping and "exam_title" not in mapping) or "date" not in mapping:
         return []
 
     def cell(row, field):
@@ -379,7 +397,7 @@ def parse_table(table) -> list:
         if row is None or all(not normalize_cell(c) for c in row):
             continue
 
-        course_name = _rejoin_final_letters(cell(row, "course_name"))
+        course_name = cell(row, "exam_title") or _rejoin_final_letters(cell(row, "course_name"))
         if not course_name:
             continue
 
@@ -397,11 +415,19 @@ def parse_table(table) -> list:
             continue
 
         start_raw = cell(row, "start_time")
-        if not normalize_time(start_raw):
+        ampm = HOUR_AMPM_RE.findall(start_raw)
+        if not normalize_time(start_raw) and not ampm:
             start_raw = _only_match(row, reverse, TIME_RE, lambda s: s) or start_raw
         end_raw = cell(row, "end_time")
         start_time = normalize_time(start_raw) if start_raw else None
         end_time = normalize_time(end_raw) if end_raw else None
+        # "1 PM-4 PM", "10 AM-1 PM", "2:00 PM": read literally, the first has
+        # no time at all and the last becomes two in the morning.
+        if ampm:
+            clock = [_ampm_clock(*t) for t in ampm[:2]]
+            start_time = clock[0]
+            if len(clock) > 1:
+                end_time = clock[1]
 
         # A single time column sometimes holds a full "HH:MM-HH:MM" range
         # (common when the source PDF only exports one time column).
@@ -761,6 +787,10 @@ DAY_NAME_TO_IDX = {
     # Python lowers "SALI" to "sali" (dotted i), so both spellings are kept.
     "pazar": 0, "pazartesi": 1, "salı": 2, "sali": 2, "çarşamba": 3, "carsamba": 3,
     "perşembe": 4, "persembe": 4, "cuma": 5, "cumartesi": 6,
+    # Spanish, found 2026-10-29 on a Chilean school timetable ("Horas | Lunes |
+    # Martes | ..."). Accents are often dropped when typed, so both are kept.
+    "domingo": 0, "lunes": 1, "martes": 2, "miércoles": 3, "miercoles": 3,
+    "jueves": 4, "viernes": 5, "sábado": 6, "sabado": 6,
 }
 
 
@@ -1782,6 +1812,118 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
     return records
 
 
+# --- School period table (days across, one period per row) ------------------
+# Found 2026-10-29 on a Chilean school timetable exported from Google Sheets:
+# "Horas | Lunes | Martes | ..." over rows like "8:10 - 8:55 | English | ...".
+# It is neither layout above: parse_class_schedule wants one bordered box per
+# class (Sheets draws a full-width stripe per row instead), and
+# parse_class_table wants one row per class. Here each ROW is a period and
+# each day column holds that period's subject -- the same shape the web app's
+# spreadsheet reader handles in parsePeriodGrid.
+#
+# School timetables also write the afternoon on a 12-hour clock with no
+# PM ("12:35 - 1:20", "1:20 - 2:10"). Read literally those classes land at
+# one in the morning, so once the clock runs backwards it is taken to have
+# passed noon (see _period_clock).
+PERIOD_BREAK_RE = re.compile(r"^(?:break|recess|lunch|recreo|almuerzo|הפסק)", re.IGNORECASE)
+PERIOD_RANGE_RE = re.compile(r"^(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})$")
+
+
+def _period_clock():
+    """A reader for successive clock readings down the hour column: a reading
+    that goes back more than half an hour, at or before 12:59, gets 12 hours
+    added -- and so does every reading after it."""
+    state = {"last": None, "offset": 0}
+
+    def read(hh, mm):
+        minutes = _clock(hh, mm)
+        if minutes is None:
+            return None
+        if (state["offset"] == 0 and state["last"] is not None
+                and minutes < 13 * 60 and minutes + 30 < state["last"]):
+            state["offset"] = 12 * 60
+        if state["offset"] and minutes < 13 * 60:
+            minutes += state["offset"]
+        state["last"] = minutes
+        return minutes
+
+    return read
+
+
+def parse_period_table(table) -> list:
+    if not table:
+        return []
+    header_idx, day_cols = None, {}
+    for i, row in enumerate(table[:5]):
+        found = {}
+        for c, cell in enumerate(row or []):
+            d = _day_index(normalize_cell(cell))
+            if d is not None:
+                found[c] = d
+        if len(found) >= 3:
+            header_idx, day_cols = i, found
+            break
+    if header_idx is None:
+        return []
+
+    body = table[header_idx + 1:]
+    width = max(len(r or []) for r in table)
+    time_col, best = None, 0
+    for c in range(width):
+        if c in day_cols:
+            continue
+        hits = sum(1 for r in body if c < len(r or []) and PERIOD_RANGE_RE.match(normalize_cell(r[c])))
+        if hits > best:
+            time_col, best = c, hits
+    if time_col is None or best < 3:
+        return []
+
+    read = _period_clock()
+    periods = []  # (row, start, end)
+    for row in body:
+        m = PERIOD_RANGE_RE.match(normalize_cell(row[time_col] if time_col < len(row or []) else ""))
+        if not m:
+            continue
+        start, end = read(m.group(1), m.group(2)), read(m.group(3), m.group(4))
+        # "L U N C H" typed one letter per day column reads as five one-letter
+        # subjects unless the row is read as a whole.
+        spelled = "".join(normalize_cell(row[c]) for c in sorted(day_cols) if c < len(row)).replace(" ", "")
+        if PERIOD_BREAK_RE.match(spelled):
+            continue
+        if start is not None and end is not None and end > start:
+            periods.append((row, start, end))
+
+    def hhmm(minutes):
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+    records = []
+    for col, day in day_cols.items():
+        open_rec, open_end = None, None
+        for row, start, end in periods:
+            name = normalize_cell(row[col] if col < len(row) else "")
+            # A merged "L U N C H" cell is spelled out across the row.
+            if not name or PERIOD_BREAK_RE.match(name.replace(" ", "")):
+                open_rec = None
+                continue
+            # A lesson taught for two periods is written twice: one class.
+            if open_rec and open_rec["_raw"] == name and open_end == start:
+                open_rec["end_time"] = hhmm(end)
+                open_end = end
+                continue
+            course_name, meeting_type, notes = split_course_name(name)
+            open_rec = {
+                "course_name": course_name, "meeting_type": meeting_type, "notes": notes,
+                "day": day, "start_time": hhmm(start), "end_time": hhmm(end),
+                "lecturer": "", "room": "", "course_code": "", "credits": "", "_raw": name,
+            }
+            open_end = end
+            records.append(open_rec)
+    for r in records:
+        r.pop("_raw")
+    records.sort(key=lambda c: (c["day"], c["start_time"]))
+    return records
+
+
 # Generous enough for a real multi-page schedule/transcript, but bounded so
 # one adversarial or pathologically slow PDF can't hang a request forever.
 #
@@ -1994,6 +2136,7 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
         lambda page: [r for table in page.extract_tables() for r in parse_class_table(table, page_semester(page))],
         lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS)
                       for r in parse_class_table(table, page_semester(page))],
+        lambda page: [r for table in page.extract_tables() for r in parse_period_table(table)],
     ]
 
     records = await _parse_with_timeout(contents, strategies)

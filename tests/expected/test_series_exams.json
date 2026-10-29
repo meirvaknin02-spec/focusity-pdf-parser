@@ -1,0 +1,26 @@
+[
+ {
+  "course_name": "UNIT TEST - 1",
+  "date": "2026-07-05",
+  "start_time": null,
+  "end_time": null
+ },
+ {
+  "course_name": "UNIT TEST - 2",
+  "date": "2026-07-26",
+  "start_time": "14:00",
+  "end_time": "17:00"
+ },
+ {
+  "course_name": "CUMULATIVE TEST - 1",
+  "date": "2026-08-09",
+  "start_time": "09:00",
+  "end_time": "12:00"
+ },
+ {
+  "course_name": "UNIT TEST - 3",
+  "date": "2026-08-23",
+  "start_time": "14:00",
+  "end_time": "17:00"
+ }
+]
