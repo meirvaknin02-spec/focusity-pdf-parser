@@ -34,5 +34,8 @@ make a test pass -- check the real document (or its geometry) first. CI runs pyt
 `main`: SCE weekly print timetable, Sapir quarter-hour blocks, missing-ToUnicode Hebrew
 fonts and dotted hour ranges are handled. Since 2026-10-25 also registration prints with one page
 per semester (semester named in the page heading), a "שעות" column holding the time range, and
-several course-ish headers (the most specific keyword wins, not the leftmost column). Known gap: University of Haifa elective-list PDFs are
+several course-ish headers (the most specific keyword wins, not the leftmost column).
+Since 2026-10-29: Spanish day names, school "period" tables (`parse_period_table`: a row per
+period, days across, 12-hour afternoon with no PM rolled past noon, "L U N C H" spelled across
+the row), and test-series exam schedules ("Test Type" names the sitting, "1 PM-4 PM" times). Known gap: University of Haifa elective-list PDFs are
 still rejected (no strategy for that table shape).

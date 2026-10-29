@@ -55,6 +55,12 @@ CASES = [
     # registration print rejected six times on 2026-10-23.
     ("parse-class-schedule-pdf", "semester_pages_timetable.pdf", "semester_pages_timetable.json",
      "one page per semester named in the heading, a 'שעות' column holding the time range"),
+    # Drawn (tools/make_period_and_test_series_fixtures.py) in the shape of two
+    # real uploads rejected or misread on 2026-10-29.
+    ("parse-class-schedule-pdf", "spanish_period_timetable.pdf", "spanish_period_timetable.json",
+     "school period table: Spanish days, a row per period, 12-hour afternoon with no PM, 'L U N C H'"),
+    ("parse-pdf", "test_series_exams.pdf", "test_series_exams.json",
+     "test series: 'Test Type' names the sitting, 'Test Timings*' as '2 PM-5 PM', subject rows under each test"),
 ]
 
 
@@ -282,3 +288,25 @@ def test_range_hour_column_ends_a_class_on_its_last_rows_printed_end():
     assert rows["Biyokimya II"]["day"] == 1  # Pazartesi = Monday
     assert rows["Biyokimya II"]["course_code"] == "BIO2201050"
     assert rows["Biyokimya II"]["room"] == "204"
+
+
+def test_school_afternoon_without_pm_is_not_read_as_the_night():
+    """'1:35 - 2:20' under '12:50 - 1:35' is the afternoon; read literally the
+    class lands at half past one in the morning."""
+    rows = parse("parse-class-schedule-pdf", "spanish_period_timetable.pdf")
+    monday = [(r["start_time"], r["end_time"], r["course_name"]) for r in rows if r["day"] == 1]
+    assert monday[-1] == ("13:35", "15:05", "Biología")
+    assert all(r["start_time"] >= "07:00" for r in rows)
+
+
+def test_lunch_spelled_across_the_day_columns_is_not_five_subjects():
+    rows = parse("parse-class-schedule-pdf", "spanish_period_timetable.pdf")
+    assert not [r for r in rows if len(r["course_name"]) == 1]
+
+
+def test_test_series_rows_are_named_after_the_test_not_the_first_subject():
+    rows = parse("parse-pdf", "test_series_exams.pdf")
+    assert [r["course_name"] for r in rows] == [
+        "UNIT TEST - 1", "UNIT TEST - 2", "CUMULATIVE TEST - 1", "UNIT TEST - 3"]
+    assert (rows[1]["start_time"], rows[1]["end_time"]) == ("14:00", "17:00")
+    assert (rows[2]["start_time"], rows[2]["end_time"]) == ("09:00", "12:00")
