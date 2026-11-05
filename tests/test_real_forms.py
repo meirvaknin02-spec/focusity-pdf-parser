@@ -61,6 +61,10 @@ CASES = [
      "school period table: Spanish days, a row per period, 12-hour afternoon with no PM, 'L U N C H'"),
     ("parse-pdf", "test_series_exams.pdf", "test_series_exams.json",
      "test series: 'Test Type' names the sitting, 'Test Timings*' as '2 PM-5 PM', subject rows under each test"),
+    # Drawn (tools/make_study_plan_fixture.py) in the shape of a real
+    # day-by-day plan sent three times as a timetable on 2026-11-05.
+    ("parse-study-plan-pdf", "study_plan_by_date.pdf", "study_plan_by_date.json",
+     "day-by-day plan: 'Nov 27 (Fri)' rows, a column per subject, HOLIDAY rows, the year in the heading, on into January"),
 ]
 
 

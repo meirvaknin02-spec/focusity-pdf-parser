@@ -21,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import pdfplumber
 from pdfminer.pdffont import FileUnicodeMap, PDFCIDFont, TrueTypeFont
 
+from study_plan import StudyPlanReader
+
 # Previously there was no logging at all: a parse failure's real cause (a
 # corrupt PDF, an unexpected pdfminer exception, ...) was visible ONLY by
 # echoing the raw exception text back to the client -- which also meant an
@@ -2146,6 +2148,59 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=422,
             detail="לא זוהתה מערכת שעות בקובץ. ודא שהקובץ הוא מערכת שעות שבועית במבנה יומן (ימים בעמודות, שעות בשורות).",
+        )
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Day-by-day study plans (study_plan.py)
+# ---------------------------------------------------------------------------
+_PLAN_HEBREW_WORDS = ("תאריך", "נושא", "מקצוע", "חזרה", "פרק", "תרגול", "יום")
+
+
+def _plan_page_needs_reverse(text: str) -> bool:
+    fixed = "\n".join(fix_bidi_line(line) for line in text.split("\n"))
+    words = _COMMON_HEBREW_WORDS + _PLAN_HEBREW_WORDS
+    return sum(fixed.count(w) for w in words) > sum(text.count(w) for w in words)
+
+
+def _plan_reader(table_settings=None):
+    state = {"reverse": False}
+
+    def extract(page):
+        state["reverse"] = _plan_page_needs_reverse(page.extract_text() or "")
+        return page.extract_tables(table_settings) if table_settings else page.extract_tables()
+
+    # A table main.py already knows as an exam list or a class list is never
+    # a study plan, whatever dates it holds.
+    def refuse(head_rows):
+        return bool(head_rows) and (detect_header_row(head_rows)[0] >= 0 or detect_class_header_row(head_rows)[0] >= 0)
+
+    return StudyPlanReader(lambda: _today(), extract, lambda cell: normalize_cell(cell, state["reverse"]), refuse)
+
+
+@app.post("/parse-study-plan-pdf")
+async def parse_study_plan_pdf(file: UploadFile = File(...)):
+    """Day-by-day study plan PDF -> one row per session: date (ISO), subject,
+    topic, start_time/end_time (HH:MM or null). The web app calls it when a
+    file sent as a weekly timetable turned out to have dates, not weekdays."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf") and file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="הקובץ שהועלה אינו PDF.")
+
+    contents = await file.read()
+    validate_pdf_contents(contents)
+
+    # A fresh reader per strategy per request: each one carries the year and
+    # the last date from page to page.
+    strategies = [_plan_reader(), _plan_reader(TEXT_TABLE_SETTINGS)]
+    records = await _parse_with_timeout(contents, strategies)
+
+    if not records:
+        raise HTTPException(
+            status_code=422,
+            detail="לא זוהתה תוכנית לימוד לפי תאריכים בקובץ. ודא שבכל שורה יש תאריך ומה ללמוד בו.",
         )
 
     return records
