@@ -11,7 +11,8 @@ Hebrew keyword header matching, geometry for weekly timetables, bidi fixes.
 
 ## Endpoints
 `POST /parse-pdf` (exam schedule), `POST /parse-grade-sheet`, `POST /parse-class-schedule-pdf`
-(weekly timetable), `GET /health`.
+(weekly timetable), `POST /parse-study-plan-pdf` (day-by-day study plan, `study_plan.py`:
+rows are dates, cells are topics; exam and class lists are refused on purpose), `GET /health`.
 
 ## Run
 ```
