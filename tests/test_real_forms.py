@@ -75,6 +75,14 @@ CASES = [
      "the same short headers over 24-hour times"),
     ("parse-class-schedule-pdf", "us_registration_days.pdf", "us_registration_days.json",
      "registration print: 'MWF' / 'TR' / 'MoWe' / 'Tue/Thu' day cells, one '9:00-9:50 AM' Time column"),
+    # Printed through Chromium (tools/make_us_registration_prints.mjs) in the
+    # layouts of three US registration systems.
+    ("parse-class-schedule-pdf", "us_banner_concise.pdf", "us_banner_concise.json",
+     "Banner concise schedule: Start/End Date columns beside Days + '9:00 am-9:50 am' Time, a TBA online row"),
+    ("parse-class-schedule-pdf", "us_peoplesoft_list.pdf", "us_peoplesoft_list.json",
+     "PeopleSoft list view: the course in a heading over each box, 'MoWeFr 9:00AM - 9:50AM' in Days & Times"),
+    ("parse-class-schedule-pdf", "us_workday_courses.pdf", "us_workday_courses.json",
+     "Workday View My Courses: 'MATH 1210 - Calculus I' listing, 'M/W/F | 9:00 AM - 9:50 AM | room' patterns"),
 ]
 
 

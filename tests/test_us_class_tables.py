@@ -132,3 +132,44 @@ def test_course_title_header_keeps_the_code_column():
 ])
 def test_meeting_type_words(raw, want):
     assert main.meeting_type_word(raw) == want
+
+
+# The same student's week as three US registration systems print it. MATH is
+# MWF + a Thursday discussion, CS is TR + a Wednesday lab, WRTG TR, PSY MW;
+# the online ECON section has no meeting time and is left out.
+REGISTRATION_WEEK = {
+    ("Calculus I", 1, "09:00", "09:50"), ("Calculus I", 3, "09:00", "09:50"), ("Calculus I", 5, "09:00", "09:50"),
+    ("Calculus I", 4, "10:45", "11:35"),
+    ("Introduction to Object-Oriented Programming", 2, "13:25", "14:45"),
+    ("Introduction to Object-Oriented Programming", 4, "13:25", "14:45"),
+    ("Introduction to Object-Oriented Programming", 3, "15:00", "16:50"),
+    ("Intermediate Writing", 2, "10:45", "12:05"), ("Intermediate Writing", 4, "10:45", "12:05"),
+    ("General Psychology", 1, "12:55", "14:15"), ("General Psychology", 3, "12:55", "14:15"),
+}
+
+
+@pytest.mark.parametrize("fixture", ["us_banner_concise.pdf", "us_peoplesoft_list.pdf", "us_workday_courses.pdf"])
+def test_us_registration_prints_read_the_whole_week(fixture):
+    rows = parse(fixture)
+    assert {(r["course_name"], r["day"], r["start_time"], r["end_time"]) for r in rows} == REGISTRATION_WEEK
+    assert len(rows) == 11
+    assert not any("Microeconomics" in r["course_name"] for r in rows)
+    calc = next(r for r in rows if r["course_name"] == "Calculus I" and r["day"] == 1)
+    assert calc["course_code"].startswith("MATH 1210") and calc["room"] == "LCB 219"
+    assert calc["lecturer"] == "Ann Carter"
+
+
+def test_term_dates_are_never_read_as_meeting_times():
+    mapping = main.map_class_columns(["Course", "Title", "Start Date", "End Date", "Days", "Time"], False)
+    assert "end_time" not in mapping and mapping["start_time"] == 5 and mapping["day"] == 4
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("MoWeFr 9:00AM - 9:50AM", ([1, 3, 5], "9:00AM - 9:50AM", "")),
+    ("M/W/F | 9:00 AM - 9:50 AM | LCB 219", ([1, 3, 5], "9:00 AM - 9:50 AM", "LCB 219")),
+    ("TR 1:25 pm-2:45 pm", ([2, 4], "1:25 pm-2:45 pm", "")),
+    ("TBA", ([], "TBA", "")),
+    ("", ([], "", "")),
+])
+def test_meeting_pattern_cells(raw, want):
+    assert main.split_meeting_pattern(raw) == want
