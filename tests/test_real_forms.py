@@ -65,6 +65,16 @@ CASES = [
     # day-by-day plan sent three times as a timetable on 2026-11-05.
     ("parse-study-plan-pdf", "study_plan_by_date.pdf", "study_plan_by_date.json",
      "day-by-day plan: 'Nov 27 (Fri)' rows, a column per subject, HOLIDAY rows, the year in the heading, on into January"),
+    # Drawn (tools/make_us_class_table_fixtures.py): the class schedule the
+    # English promo films import, and a US registration print (2026-11-20).
+    ("parse-class-schedule-pdf", "us_class_table_ampm.pdf", "us_class_table_ampm.json",
+     "American row-per-class table: '2:00 PM' times, a Type column of Lecture / Recitation / Lab / Seminar"),
+    ("parse-class-schedule-pdf", "us_class_table_short_headers.pdf", "us_class_table_short_headers.json",
+     "short headers 'Course | Title | ... | Start | End': the title is the name, the course is the code"),
+    ("parse-class-schedule-pdf", "us_class_table_short_24h.pdf", "us_class_table_short_24h.json",
+     "the same short headers over 24-hour times"),
+    ("parse-class-schedule-pdf", "us_registration_days.pdf", "us_registration_days.json",
+     "registration print: 'MWF' / 'TR' / 'MoWe' / 'Tue/Thu' day cells, one '9:00-9:50 AM' Time column"),
 ]
 
 

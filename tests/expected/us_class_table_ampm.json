@@ -1,0 +1,110 @@
+[
+  {
+    "course_name": "Calculus I",
+    "meeting_type": "lecture",
+    "notes": "",
+    "day": 1,
+    "start_time": "08:30",
+    "end_time": "10:00",
+    "lecturer": "Dr. Carter",
+    "room": "Hall 104",
+    "course_code": "MATH 101",
+    "credits": 4.0
+  },
+  {
+    "course_name": "Intro to Computer Science",
+    "meeting_type": "lecture",
+    "notes": "",
+    "day": 1,
+    "start_time": "10:30",
+    "end_time": "12:00",
+    "lecturer": "Prof. Lee",
+    "room": "Eng 201",
+    "course_code": "CS 110",
+    "credits": 4.0
+  },
+  {
+    "course_name": "Statistics",
+    "meeting_type": "lecture",
+    "notes": "",
+    "day": 2,
+    "start_time": "09:00",
+    "end_time": "10:30",
+    "lecturer": "Dr. Brooks",
+    "room": "Sci 310",
+    "course_code": "STAT 200",
+    "credits": 3.0
+  },
+  {
+    "course_name": "Calculus I",
+    "meeting_type": "practice",
+    "notes": "",
+    "day": 2,
+    "start_time": "12:00",
+    "end_time": "13:30",
+    "lecturer": "Mr. Reed",
+    "room": "Hall 102",
+    "course_code": "MATH 101",
+    "credits": 4.0
+  },
+  {
+    "course_name": "Intro to Economics",
+    "meeting_type": "lecture",
+    "notes": "",
+    "day": 3,
+    "start_time": "10:00",
+    "end_time": "11:30",
+    "lecturer": "Dr. Hayes",
+    "room": "Bus 105",
+    "course_code": "ECON 101",
+    "credits": 3.0
+  },
+  {
+    "course_name": "Intro to Computer Science",
+    "meeting_type": "lab",
+    "notes": "",
+    "day": 3,
+    "start_time": "14:00",
+    "end_time": "15:30",
+    "lecturer": "Ms. Patel",
+    "room": "Lab 2",
+    "course_code": "CS 110",
+    "credits": 4.0
+  },
+  {
+    "course_name": "Academic Writing",
+    "meeting_type": "workshop",
+    "notes": "",
+    "day": 4,
+    "start_time": "08:30",
+    "end_time": "10:00",
+    "lecturer": "Ms. Green",
+    "room": "Hum 208",
+    "course_code": "ENG 120",
+    "credits": 3.0
+  },
+  {
+    "course_name": "Statistics",
+    "meeting_type": "practice",
+    "notes": "",
+    "day": 4,
+    "start_time": "12:00",
+    "end_time": "13:30",
+    "lecturer": "Mr. Diaz",
+    "room": "Sci 310",
+    "course_code": "STAT 200",
+    "credits": 3.0
+  },
+  {
+    "course_name": "Intro to Economics",
+    "meeting_type": "practice",
+    "notes": "",
+    "day": 5,
+    "start_time": "09:00",
+    "end_time": "10:30",
+    "lecturer": "Ms. Ford",
+    "room": "Bus 105",
+    "course_code": "ECON 101",
+    "credits": 3.0
+  }
+]

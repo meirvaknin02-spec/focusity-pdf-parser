@@ -309,6 +309,55 @@ def extract_time_range(raw: str):
     return f"{int(h1):02d}:{int(m1):02d}", f"{int(h2):02d}:{int(m2):02d}"
 
 
+# --- 12-hour clocks in row-per-class tables ---------------------------------
+# Found 2026-11-20 on an American class schedule: "2:00 PM" went through
+# TIME_RE and came out 02:00, and "12:00 PM - 1:30 PM" became 01:30-12:00
+# after the start>end swap. These readers honour the AM/PM marker and fall
+# back to the 24-hour reading when there is none.
+_HALF = r"([AaPp])\.?\s*[Mm]\.?(?![A-Za-z])"
+CLOCK_RANGE_RE = re.compile(
+    r"(\d{1,2})(?:[:.](\d{2}))?\s*(?:" + _HALF + r")?\s*(?:[-–—]|\bto\b)\s*"
+    r"(\d{1,2})(?:[:.](\d{2}))?\s*(?:" + _HALF + r")?"
+)
+
+
+def read_clock(raw: str) -> Optional[str]:
+    """"2:00 PM" -> "14:00", "9 am" -> "09:00", "14:00" -> "14:00"."""
+    if not raw:
+        return None
+    match = HOUR_AMPM_RE.search(raw)
+    if match:
+        return _ampm_clock(*match.groups())
+    return normalize_time(raw)
+
+
+def read_clock_range(raw: str):
+    """A whole meeting in one cell: "9:00 AM - 10:15 AM", "11:00-12:15 PM",
+    "1 PM to 2:30 PM", "17:00 -19:15". A bare "10-13" (no minutes, no
+    marker) is not read -- too easily a page range or a group number. When
+    only one end carries the marker, the other end shares it unless that
+    puts the start after the end ("11:00-12:15 PM" starts at 11:00 AM)."""
+    if not raw:
+        return None, None
+    match = CLOCK_RANGE_RE.search(raw)
+    if not match:
+        return None, None
+    h1, m1, half1, h2, m2, half2 = match.groups()
+    if not (half1 or half2):
+        return extract_time_range(raw)
+    start = _ampm_clock(h1, m1, half1 or half2)
+    end = _ampm_clock(h2, m2, half2 or half1)
+    if start and end and start > end and not (half1 and half2):
+        flip = lambda half: "a" if half.lower() == "p" else "p"
+        if half1:
+            end = _ampm_clock(h2, m2, flip(half1))
+        else:
+            start = _ampm_clock(h1, m1, flip(half2))
+    if not start or not end:
+        return None, None
+    return start, end
+
+
 def match_field(header_cell: str) -> Optional[str]:
     """Substring match, ignoring whitespace on both sides: pdfplumber breaks
     a wrapped header into "מס.שיעור\nוקבוצה" and detaches Hebrew final
@@ -1520,23 +1569,35 @@ CLASS_FIELD_KEYWORDS = {
     # fallback) is a substring of "עד שעה", and "יום" (day's keyword) is a
     # substring of "סיום" -- so end_time must be tried before both
     # start_time and day can see the cell.
-    "end_time": ["עד שעה", "שעה עד", "שעת סיום", "סיום", "end time", "until", "finish"],
+    # English keywords match at the start of a word only (see
+    # _class_keyword_in), so the short "end" cannot claim "Attendance".
+    "end_time": ["עד שעה", "שעה עד", "שעת סיום", "סיום", "end time", "end", "until", "finish"],
     # A weekly-hours column ("שעות", SCE's ש"ש) would otherwise be claimed
     # by start_time's bare "שעה" fallback -- absorbed here and then simply
     # not carried into the record.
     "hours": ["שעות", 'ש"ש', "ש״ש", "weekly hours", "hours"],
-    "start_time": ["משעה", "שעת התחלה", "שעה מ", "התחלה", "שעה", "start time", "start", "from", "hour"],
-    "day": ["יום", "day"],
+    # "time" last: a lone "Time" / "Meeting Time" column holds the range.
+    "start_time": ["משעה", "שעת התחלה", "שעה מ", "התחלה", "שעה", "start time", "start", "begin", "from", "hour",
+                   "time"],
+    "day": ["יום", "day", "weekday"],
+    # The kind of meeting (Lecture / Recitation / Lab) in its own column, as
+    # US schedules print it. English only: Hebrew "סוג מקצוע" is the
+    # subject's type (required/elective), not the meeting's. Before
+    # course_name, whose "course" would otherwise claim "Course Type".
+    "meeting_type": ["meeting type", "class type", "section type", "component", "type"],
     # credits before course_code: "קוד" is a substring of "נקודות" (the
     # same trap documented on GRADE_FIELD_KEYWORDS above).
     "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "נ״ז", "זיכוי", "credits", "credit", "ects"],
     # course_code before course_name: course_name's generic "שיעור"/"קורס"
     # fallbacks are substrings of "קוד שיעור"/"קוד קורס".
-    "course_code": ["קוד שיעור", "קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id", "code"],
+    "course_code": ["קוד שיעור", "קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id",
+                    "course number", "course #", "code"],
     # Bare "שעור" (no yod) is how SCE's Michlol weekly print view heads it.
+    # "title" sits above the bare "course": a US "Course | Title" header puts
+    # the code under "Course" and the name under "Title".
     "course_name": ["שם שיעור", "שם השיעור", "שם שעור", "שם הקורס", "שם קורס", "שם מקצוע", "מקצוע", "שיעור", "שעור", "קורס",
-                    "course name", "course title", "subject", "course"],
-    "lecturer": ["מרצה", "lecturer", "instructor", "teacher"],
+                    "course name", "course title", "class name", "class title", "title", "subject", "course"],
+    "lecturer": ["מרצה", "lecturer", "instructor", "teacher", "professor", "faculty"],
     # "מקום" is how the iTextSharp registration print (M.A. timetable, one
     # page per semester) heads its room column ("253", "זום").
     "room": ["חדר", "כיתה", "אולם", "מיקום", "מקום", "בניין", "room", "hall", "location", "classroom", "building"],
@@ -1558,13 +1619,76 @@ def parse_class_day(raw: str) -> Optional[int]:
     return CLASS_DAY_LETTERS.get(text)
 
 
+# US registration prints put every weekly meeting of a section in one day
+# cell: "MWF", "TR", "TTh", "MoWe", "Tue/Thu", "Mon, Wed". Single capitals
+# only in the packed form, so an ordinary word is never read as days.
+_DAY_CODES = {"Mo": 1, "Tu": 2, "We": 3, "Th": 4, "Fr": 5, "Sa": 6, "Su": 0,
+              "M": 1, "T": 2, "W": 3, "R": 4, "F": 5, "S": 6, "U": 0}
+_DAY_CODES_RE = re.compile(r"^(?:Mo|Tu|We|Th|Fr|Sa|Su|M|T|W|R|F|S|U)+$")
+_DAY_ABBREV = {"tues": 2, "thur": 4, "thurs": 4, "weds": 3}
+
+
+def parse_class_days(raw: str) -> list:
+    """Every day a row's day cell names, in order, without repeats."""
+    if not raw:
+        return []
+    single = parse_class_day(raw)
+    if single is not None:
+        return [single]
+    text = raw.strip()
+    parts = [p for p in re.split(r"\s*(?:[,/&;+]|\band\b)\s*|\s+", text) if p]
+    days = []
+    if len(parts) > 1:
+        for part in parts:
+            idx = parse_class_day(part.strip(".")) if not part.isascii() else (
+                _day_index(part.strip(".")) if _day_index(part.strip(".")) is not None
+                else _DAY_ABBREV.get(part.strip(".").lower()))
+            if idx is None:
+                return []
+            days.append(idx)
+    elif text.isascii() and len(text) <= 14 and _DAY_CODES_RE.match(text):
+        days = [_DAY_CODES[code] for code in re.findall(r"Mo|Tu|We|Th|Fr|Sa|Su|[MTWRFSU]", text)]
+    else:
+        idx = _DAY_ABBREV.get(text.strip(".").lower())
+        days = [idx] if idx is not None else []
+    return list(dict.fromkeys(days))
+
+
+def meeting_type_word(raw: str) -> str:
+    """A Type column's value ("Lecture", "Recitation", "LAB", "Lec") as the
+    app's meeting type, or "" when it is not a kind of meeting."""
+    word = re.sub(r"\s+", " ", str(raw or "")).strip().lower().rstrip(".")
+    if not word:
+        return ""
+    if re.match(r"^(?:lec|lecture)\b", word):
+        return "lecture"
+    if re.match(r"^(?:rec|recitation|practice|tutorial|tut|exercise|discussion|dis)\b", word):
+        return "practice"
+    if re.match(r"^(?:lab|laboratory)\b", word):
+        return "lab"
+    # Seminar as workshop, as the transposed-grid reader above files it.
+    if re.match(r"^(?:workshop|studio|seminar|sem)\b", word):
+        return "workshop"
+    return ""
+
+
+def _class_keyword_in(keyword: str, lowered: str) -> bool:
+    """Hebrew keywords match anywhere in the cell (pdfplumber detaches final
+    letters and wraps headers mid-word). Latin ones match at the start of a
+    word, so "end" finds "End" and "End Time" but not "Attendance", and
+    "type" not "Prototype"."""
+    if keyword.isascii():
+        return re.search(r"(?<![a-z])" + re.escape(keyword), lowered) is not None
+    return keyword in lowered
+
+
 def match_class_field(header_cell: str) -> Optional[str]:
     if not header_cell:
         return None
     lowered = header_cell.lower()
     for field, keywords in CLASS_FIELD_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in lowered:
+            if _class_keyword_in(keyword, lowered):
                 return field
     return None
 
@@ -1588,7 +1712,7 @@ def _class_keyword_rank(field: str, header_cell: str) -> int:
     run specific -> generic, so a lower rank is the better claim."""
     lowered = header_cell.lower()
     for rank, keyword in enumerate(CLASS_FIELD_KEYWORDS[field]):
-        if keyword in lowered:
+        if _class_keyword_in(keyword, lowered):
             return rank
     return len(CLASS_FIELD_KEYWORDS[field])
 
@@ -1600,15 +1724,27 @@ def map_class_columns(header_row, reverse: bool) -> dict:
     every course came out named after its type, and "קורס" (the course
     number) would have been next in line ahead of "שם הקורס"."""
     best = {}
+    name_candidates = []
     for idx, raw_cell in enumerate(header_row):
         text = normalize_cell(raw_cell, reverse)
         field = match_class_field(text)
         if not field:
             continue
         rank = _class_keyword_rank(field, text)
+        if field == "course_name":
+            name_candidates.append((rank, idx, text))
         if field not in best or rank < best[field][0]:
             best[field] = (rank, idx)
-    return {field: idx for field, (rank, idx) in best.items()}
+    mapping = {field: idx for field, (rank, idx) in best.items()}
+    # "Course | Title": the bare English "Course" column that lost the name
+    # to "Title" is the course code ("MATH 101"). Hebrew "קורס" is left
+    # alone -- the prints that use it have their own code column.
+    if "course_code" not in mapping and "course_name" in mapping:
+        for rank, idx, text in name_candidates:
+            if idx != mapping["course_name"] and text.strip().lower() in ("course", "course:"):
+                mapping["course_code"] = idx
+                break
+    return mapping
 
 
 def _promote_hours_range_column(table, header_idx, mapping, reverse) -> None:
@@ -1767,19 +1903,20 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
 
         # A merged/repeated day cell may extract as empty on continuation
         # rows -- rows are grouped by day, so the previous row's day holds.
-        day = parse_class_day(cell(row, "day"))
-        if day is None:
-            day = last_day
-        if day is None:
+        days = parse_class_days(cell(row, "day"))
+        if not days:
+            days = last_day
+        if not days:
             continue
-        last_day = day
+        last_day = days
 
         start_raw = cell(row, "start_time")
-        start_time = normalize_time(start_raw)
-        end_time = normalize_time(cell(row, "end_time"))
-        # One column holding the whole range ("17:00 -19:15").
-        if "end_time" not in mapping:
-            range_start, range_end = extract_time_range(start_raw)
+        start_time = read_clock(start_raw)
+        end_time = read_clock(cell(row, "end_time"))
+        # One column holding the whole range ("17:00 -19:15",
+        # "9:00 AM - 10:15 AM").
+        if "end_time" not in mapping or not end_time:
+            range_start, range_end = read_clock_range(start_raw)
             if range_start:
                 start_time, end_time = range_start, range_end
         # Same RTL-flip safety as parse_table: classes never span midnight,
@@ -1796,19 +1933,22 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
                 pass
 
         course_name, meeting_type, notes = split_course_name(course_name)
-        records.append({
-            "course_name": course_name,
-            "meeting_type": meeting_type,
-            "notes": notes,
-            "day": day,
-            "start_time": start_time,
-            "end_time": end_time,
-            "lecturer": cell(row, "lecturer"),
-            "room": cell(row, "room"),
-            "course_code": cell(row, "course_code"),
-            "credits": credits if credits is not None else "",
-            "_semester": semester,
-        })
+        meeting_type = meeting_type_word(cell(row, "meeting_type")) or meeting_type
+        # "MWF 9:00-9:50": one row, three weekly meetings.
+        for day in days:
+            records.append({
+                "course_name": course_name,
+                "meeting_type": meeting_type,
+                "notes": notes,
+                "day": day,
+                "start_time": start_time,
+                "end_time": end_time,
+                "lecturer": cell(row, "lecturer"),
+                "room": cell(row, "room"),
+                "course_code": cell(row, "course_code"),
+                "credits": credits if credits is not None else "",
+                "_semester": semester,
+            })
 
     records.sort(key=lambda c: (c["day"], c["start_time"] or ""))
     return records
