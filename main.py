@@ -1565,6 +1565,12 @@ def parse_class_schedule(page):
 # ACROSS fields because match_class_field checks fields in this dict's own
 # order and returns on the first substring hit.
 CLASS_FIELD_KEYWORDS = {
+    # One cell holding the days AND the time, as US registration systems
+    # print it: PeopleSoft "Days & Times" ("MoWeFr 9:00AM - 9:50AM"),
+    # Workday "Meeting Patterns" ("M/W/F | 9:00 AM - 9:50 AM | LCB 219").
+    # First, so "times" never reaches start_time's "time" or "days" day's.
+    "day_time": ["days & times", "days and times", "days/times", "day & time", "day and time", "day/time",
+                 "meeting pattern", "meeting time", "meeting info"],
     # end_time first of the time-ish fields: "שעה" (start_time's generic
     # fallback) is a substring of "עד שעה", and "יום" (day's keyword) is a
     # substring of "סיום" -- so end_time must be tried before both
@@ -1584,10 +1590,10 @@ CLASS_FIELD_KEYWORDS = {
     # US schedules print it. English only: Hebrew "סוג מקצוע" is the
     # subject's type (required/elective), not the meeting's. Before
     # course_name, whose "course" would otherwise claim "Course Type".
-    "meeting_type": ["meeting type", "class type", "section type", "component", "type"],
+    "meeting_type": ["meeting type", "class type", "section type", "instructional format", "component", "type"],
     # credits before course_code: "קוד" is a substring of "נקודות" (the
     # same trap documented on GRADE_FIELD_KEYWORDS above).
-    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "נ״ז", "זיכוי", "credits", "credit", "ects"],
+    "credits": ["נ.זיכוי", "נקודות זיכוי", "נקודות זכות", 'נ"ז', "נ״ז", "זיכוי", "credits", "credit", "ects", "units"],
     # course_code before course_name: course_name's generic "שיעור"/"קורס"
     # fallbacks are substrings of "קוד שיעור"/"קוד קורס".
     "course_code": ["קוד שיעור", "קוד קורס", "מספר קורס", "מס' קורס", "קוד", "course code", "course no", "course id",
@@ -1640,9 +1646,15 @@ def parse_class_days(raw: str) -> list:
     days = []
     if len(parts) > 1:
         for part in parts:
-            idx = parse_class_day(part.strip(".")) if not part.isascii() else (
-                _day_index(part.strip(".")) if _day_index(part.strip(".")) is not None
-                else _DAY_ABBREV.get(part.strip(".").lower()))
+            word = part.strip(".")
+            if not part.isascii():
+                idx = parse_class_day(word)
+            elif _day_index(word) is not None:
+                idx = _day_index(word)
+            elif word in _DAY_CODES:            # "M/W/F", "T/Th"
+                idx = _DAY_CODES[word]
+            else:
+                idx = _DAY_ABBREV.get(word.lower())
             if idx is None:
                 return []
             days.append(idx)
@@ -1652,6 +1664,31 @@ def parse_class_days(raw: str) -> list:
         idx = _DAY_ABBREV.get(text.strip(".").lower())
         days = [idx] if idx is not None else []
     return list(dict.fromkeys(days))
+
+
+# "MATH 1210 - Calculus I", "CS 1410: Intro to Programming" -- a US course
+# listing, code first.
+LATIN_COURSE_HEADING_RE = re.compile(r"^([A-Z]{2,5}\s?\d{3,4}[A-Z]?(?:[-\s]\d{1,3})?)\s*[-–:]\s+(\S.*)$")
+
+
+def split_meeting_pattern(raw: str):
+    """One cell holding a meeting -> (days, time text, room):
+    "MoWeFr 9:00AM - 9:50AM", "M/W/F | 9:00 AM - 9:50 AM | LCB 219",
+    "TR 1:25 pm-2:45 pm". The days are the leading token(s) that read as
+    days; the room is what follows a second "|"."""
+    text = (raw or "").strip()
+    if not text:
+        return [], "", ""
+    if "|" in text:
+        parts = [p.strip() for p in text.split("|")]
+        days = parse_class_days(parts[0])
+        if days:
+            return days, " ".join(parts[1:2]), " | ".join(p for p in parts[2:] if p)
+    first, _, rest = text.partition(" ")
+    days = parse_class_days(first)
+    if days:
+        return days, rest.strip(), ""
+    return [], text, ""
 
 
 def meeting_type_word(raw: str) -> str:
@@ -1682,10 +1719,18 @@ def _class_keyword_in(keyword: str, lowered: str) -> bool:
     return keyword in lowered
 
 
+# "Start Date" / "End Date" / "Start/End Date": the term's dates, which a US
+# registration print puts beside the meeting time. Their "start"/"end" would
+# otherwise claim the time fields, and every class came out with no time.
+CLASS_DATE_HEADER_RE = re.compile(r"(?<![a-z])dates?(?![a-z])")
+
+
 def match_class_field(header_cell: str) -> Optional[str]:
     if not header_cell:
         return None
     lowered = header_cell.lower()
+    if CLASS_DATE_HEADER_RE.search(lowered):
+        return None
     for field, keywords in CLASS_FIELD_KEYWORDS.items():
         for keyword in keywords:
             if _class_keyword_in(keyword, lowered):
@@ -1843,11 +1888,14 @@ def keep_running_semester(records: list) -> list:
     return [r for r, s in tagged if s in (want, None)]
 
 
-def parse_class_table(table, page_semester: Optional[str] = None) -> list:
+def parse_class_table(table, page_semester: Optional[str] = None, heading_course: Optional[tuple] = None) -> list:
     """Row-per-class table -> the same record shape parse_class_schedule
     produces, so the frontend review table needs no translation.
     `page_semester` is the semester named in the page heading, for prints
-    that put each semester on its own page instead of a banner row."""
+    that put each semester on its own page instead of a banner row.
+    `heading_course` is (code, name) from a "MATH 1210 - Calculus I" line
+    above the table, for prints that name the course over each section
+    table instead of in a column (PeopleSoft's list view)."""
     if not table:
         return []
     header_idx, reverse = detect_class_header_row(table)
@@ -1857,7 +1905,10 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
     _promote_hours_range_column(table, header_idx, mapping, reverse)
     # Without a day and a start time this is some other course table (an
     # exam schedule, a transcript), not a weekly class schedule.
-    if "course_name" not in mapping or "day" not in mapping or "start_time" not in mapping:
+    has_name = "course_name" in mapping or heading_course
+    has_day = "day" in mapping or "day_time" in mapping
+    has_time = "start_time" in mapping or "day_time" in mapping
+    if not (has_name and has_day and has_time):
         return []
 
     header = table[header_idx]
@@ -1898,19 +1949,30 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
             continue
 
         course_name = cell(row, "course_name")
+        course_code = cell(row, "course_code")
+        if not course_name and heading_course:
+            course_code = course_code or heading_course[0]
+            course_name = heading_course[1]
         if not course_name:
             continue
+        # Workday's "Course Listing" is "MATH 1210 - Calculus I".
+        listed = LATIN_COURSE_HEADING_RE.match(course_name)
+        if listed and not course_code:
+            course_code, course_name = listed.group(1), listed.group(2).strip()
 
+        pattern_days, pattern_time, pattern_room = split_meeting_pattern(cell(row, "day_time"))
+        day_raw = cell(row, "day")
         # A merged/repeated day cell may extract as empty on continuation
         # rows -- rows are grouped by day, so the previous row's day holds.
-        days = parse_class_days(cell(row, "day"))
-        if not days:
+        # Only an EMPTY cell carries over: "TBA" (an online course) is no day.
+        days = parse_class_days(day_raw) or pattern_days
+        if not days and "day" in mapping and not day_raw:
             days = last_day
         if not days:
             continue
         last_day = days
 
-        start_raw = cell(row, "start_time")
+        start_raw = cell(row, "start_time") or pattern_time
         start_time = read_clock(start_raw)
         end_time = read_clock(cell(row, "end_time"))
         # One column holding the whole range ("17:00 -19:15",
@@ -1943,9 +2005,10 @@ def parse_class_table(table, page_semester: Optional[str] = None) -> list:
                 "day": day,
                 "start_time": start_time,
                 "end_time": end_time,
-                "lecturer": cell(row, "lecturer"),
-                "room": cell(row, "room"),
-                "course_code": cell(row, "course_code"),
+                # Banner marks the primary instructor "Ann Carter (P)".
+                "lecturer": re.sub(r"\s*\(P\)$", "", cell(row, "lecturer")),
+                "room": cell(row, "room") or pattern_room,
+                "course_code": course_code,
                 "credits": credits if credits is not None else "",
                 "_semester": semester,
             })
@@ -2106,6 +2169,39 @@ MIN_EXTRACTABLE_TEXT_CHARS = 20
 # + required-column checks), so a garbage grid is rejected the same way any
 # non-schedule table is.
 TEXT_TABLE_SETTINGS = {"vertical_strategy": "text", "horizontal_strategy": "text"}
+
+
+def _heading_course_above(page, top: float) -> Optional[tuple]:
+    """The nearest "MATH 1210 - Calculus I" line above `top` (a table's top
+    edge), as (code, name). PeopleSoft's list view titles each course's box
+    this way and leaves the course out of the section table itself; between
+    the title and the section table there is only the status table."""
+    if top <= 1:
+        return None
+    try:
+        text = page.crop((0, max(0, top - 220), page.width, top)).extract_text() or ""
+    except ValueError:
+        return None
+    for line in reversed(text.split("\n")):
+        match = LATIN_COURSE_HEADING_RE.match(line.strip())
+        if match:
+            return match.group(1), match.group(2).strip()
+    return None
+
+
+def class_tables_on_page(page, settings=None) -> list:
+    """Every row-per-class table on the page. A table with no course column
+    gets the course from the heading above it, when there is one."""
+    semester = page_semester(page)
+    records = []
+    for found in page.find_tables(settings or {}):
+        table = found.extract()
+        heading = None
+        header_idx, reverse = detect_class_header_row(table)
+        if header_idx != -1 and "course_name" not in map_class_columns(table[header_idx], reverse):
+            heading = _heading_course_above(page, found.bbox[1])
+        records.extend(parse_class_table(table, semester, heading))
+    return records
 
 
 def _extract_records_sync(contents: bytes, strategies: list) -> list:
@@ -2275,9 +2371,8 @@ async def parse_class_schedule_pdf(file: UploadFile = File(...)):
     # non-empty layer's records are used -- see _extract_records_sync.
     strategies = [
         lambda page: parse_class_schedule(page) or [],
-        lambda page: [r for table in page.extract_tables() for r in parse_class_table(table, page_semester(page))],
-        lambda page: [r for table in page.extract_tables(TEXT_TABLE_SETTINGS)
-                      for r in parse_class_table(table, page_semester(page))],
+        lambda page: class_tables_on_page(page),
+        lambda page: class_tables_on_page(page, TEXT_TABLE_SETTINGS),
         lambda page: [r for table in page.extract_tables() for r in parse_period_table(table)],
     ]
 

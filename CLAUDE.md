@@ -43,5 +43,7 @@ Since 2026-11-20 row-per-class tables read US schedules: AM/PM times (`read_cloc
 `read_clock_range`), short English headers ("Course | Title | Type | Day | Start | End"; Latin
 keywords match at a word start only, Hebrew anywhere), "Title" beats a bare "Course" (which then
 becomes the code), a Type/Component column as `meeting_type`, and packed day cells ("MWF", "TR",
-"Tue/Thu") as one record per day (`tests/test_us_class_tables.py`). Known gap: University of Haifa elective-list PDFs are
+"Tue/Thu") as one record per day (`tests/test_us_class_tables.py`). Also the three US registration
+print layouts (Banner concise, PeopleSoft list view with the course in a heading over each table,
+Workday "Meeting Patterns"); "Start/End Date" columns are never read as times. Known gap: University of Haifa elective-list PDFs are
 still rejected (no strategy for that table shape).
