@@ -45,5 +45,9 @@ keywords match at a word start only, Hebrew anywhere), "Title" beats a bare "Cou
 becomes the code), a Type/Component column as `meeting_type`, and packed day cells ("MWF", "TR",
 "Tue/Thu") as one record per day (`tests/test_us_class_tables.py`). Also the three US registration
 print layouts (Banner concise, PeopleSoft list view with the course in a heading over each table,
-Workday "Meeting Patterns"); "Start/End Date" columns are never read as times. Known gap: University of Haifa elective-list PDFs are
+Workday "Meeting Patterns"); "Start/End Date" columns are never read as times.
+Since 2026-11-23 English exam schedules too: a bare "Title" is the name and "Course" the code,
+an exact "End" column, 12-hour end times, and month-first dates (`table_date_order`: a number over 12
+settles it; all-ambiguous English tables with AM/PM read month-first; Hebrew and 24-hour stay day-first;
+`tests/test_us_exam_schedules.py`). Known gap: University of Haifa elective-list PDFs are
 still rejected (no strategy for that table shape).
