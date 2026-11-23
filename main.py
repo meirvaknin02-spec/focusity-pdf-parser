@@ -254,16 +254,25 @@ TEXT_DATE_DMY_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})")
 TEXT_DATE_MDY_RE = re.compile(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})")
 
 
-def normalize_date(raw: str) -> Optional[str]:
+def normalize_date(raw: str, order: str = "dmy") -> Optional[str]:
     """DD/MM/YYYY (or . / - separated, 2- or 4-digit year), '1 Feb 2026' or
-    'Feb 1, 2026' -> ISO yyyy-mm-dd."""
+    'Feb 1, 2026' -> ISO yyyy-mm-dd.
+
+    `order` is how a numeric date is read: "dmy" (Israel, Europe, India) or
+    "mdy" (the US; see table_date_order). A numeric date that is impossible
+    in the given order but valid in the other ("12/14/2026": there is no
+    14th month) is read the other way -- an American exam schedule used to
+    lose every row to that (2026-11-23)."""
     day = month = year_num = None
     match = DATE_RE.search(raw)
     if match:
-        day, month, year = match.groups()
-        day, month, year_num = int(day), int(month), int(year)
+        first, second, year = match.groups()
+        first, second, year_num = int(first), int(second), int(year)
         if year_num < 100:
             year_num += 2000
+        day, month = (second, first) if order == "mdy" else (first, second)
+        if month > 12 and day <= 12:
+            day, month = month, day
     else:
         m = TEXT_DATE_DMY_RE.search(raw)
         if m and m.group(2)[:3].lower() in MONTH_NAMES:
@@ -427,6 +436,65 @@ def _only_match(row, reverse: bool, pattern, convert):
     return hits[0] if len(hits) == 1 else None
 
 
+def _promote_title_column(header_row, reverse: bool, mapping: dict) -> None:
+    """A bare "Title" column is the course's name, and a bare "Course" next to
+    it is the code ("MATH 1172") -- the way US exam schedules and
+    registration prints head them. The same rule the class tables follow
+    (map_class_columns); before it, an American final-exam schedule imported
+    course codes as names."""
+    squashed = [re.sub(r"\s+", "", normalize_cell(c, reverse).lower()) for c in header_row]
+    title_idx = next((i for i, h in enumerate(squashed) if h in ("title", "coursetitle")), None)
+    if title_idx is None:
+        return
+    name_idx = mapping.get("course_name")
+    if name_idx is not None and name_idx != title_idx and squashed[name_idx] == "course":
+        mapping.setdefault("course_code", name_idx)
+    mapping["course_name"] = title_idx
+
+
+def _exact_end_column(header_row, reverse: bool, mapping: dict) -> None:
+    """A column headed just "End" is the end time. "end" is not a keyword
+    (it hides inside "attendance"), so it is only taken as the whole cell."""
+    if "end_time" in mapping:
+        return
+    for idx, raw in enumerate(header_row):
+        if re.sub(r"\s+", "", normalize_cell(raw, reverse).lower()) in ("end", "ends"):
+            mapping["end_time"] = idx
+            return
+
+
+def table_date_order(table, header_idx: int, mapping: dict, reverse: bool) -> str:
+    """How this table writes numeric dates: "mdy" or "dmy".
+
+    A date whose first number is over 12 settles it as day-first, one whose
+    second number is over 12 as month-first. When every date is ambiguous
+    (3/4/2027), an English table that also writes 12-hour times is read the
+    American way; anything else keeps the day-first reading every Israeli,
+    European and Indian schedule uses."""
+    header_text = " ".join(normalize_cell(c, reverse) for c in table[header_idx])
+    dmy = mdy = False
+    ampm = False
+    for row in table[header_idx + 1:]:
+        if not row:
+            continue
+        for raw in row:
+            value = normalize_cell(raw, reverse)
+            if not value:
+                continue
+            for first, second, _ in DATE_RE.findall(value):
+                if int(first) > 12:
+                    dmy = True
+                elif int(second) > 12:
+                    mdy = True
+            if HOUR_AMPM_RE.search(value):
+                ampm = True
+    if dmy != mdy:
+        return "mdy" if mdy else "dmy"
+    if not dmy and ampm and not HEBREW_LETTER_RE.search(header_text):
+        return "mdy"
+    return "dmy"
+
+
 def parse_table(table) -> list:
     if not table:
         return []
@@ -434,8 +502,12 @@ def parse_table(table) -> list:
     if header_idx == -1:
         return []
     mapping = map_columns(table[header_idx], reverse)
+    _promote_title_column(table[header_idx], reverse, mapping)
+    _exact_end_column(table[header_idx], reverse, mapping)
     if ("course_name" not in mapping and "exam_title" not in mapping) or "date" not in mapping:
         return []
+    order = table_date_order(table, header_idx, mapping, reverse)
+    read_date = lambda raw: normalize_date(raw, order)
 
     def cell(row, field):
         idx = mapping.get(field)
@@ -459,9 +531,9 @@ def parse_table(table) -> list:
         # date. When the mapped cell holds no date, take the row's only
         # date-shaped cell instead; a row with two candidates stays
         # ambiguous and is skipped as before.
-        date_iso = normalize_date(cell(row, "date"))
+        date_iso = read_date(cell(row, "date"))
         if not date_iso:
-            date_iso = _only_match(row, reverse, DATE_RE, normalize_date)
+            date_iso = _only_match(row, reverse, DATE_RE, read_date)
         if not date_iso:
             continue
 
@@ -471,7 +543,8 @@ def parse_table(table) -> list:
             start_raw = _only_match(row, reverse, TIME_RE, lambda s: s) or start_raw
         end_raw = cell(row, "end_time")
         start_time = normalize_time(start_raw) if start_raw else None
-        end_time = normalize_time(end_raw) if end_raw else None
+        # read_clock honours AM/PM: "1:45 PM" in an End column is 13:45, not 01:45.
+        end_time = read_clock(end_raw) if end_raw else None
         # "1 PM-4 PM", "10 AM-1 PM", "2:00 PM": read literally, the first has
         # no time at all and the last becomes two in the morning.
         if ampm:
