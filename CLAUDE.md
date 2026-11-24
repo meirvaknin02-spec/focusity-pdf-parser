@@ -29,7 +29,9 @@ In Git Bash use a Windows path for curl uploads: `curl -F "file=@C:/path/file.pd
 `tests/test_real_forms.py` parses redacted real PDFs and compares every row with
 `tests/expected/*.json`. Fixtures are redacted with `tools/make_fixtures.py`; a test fails if a
 fixture contains an ID number, mobile number or email. Never regenerate an expected file just to
-make a test pass -- check the real document (or its geometry) first. CI runs pytest on every push.
+make a test pass -- check the real document (or its geometry) first. CI runs pytest on every push,
+on `ubuntu-24.04` with Python pinned to render.yaml's 3.11.9 (`ubuntu-latest` = 26.04 has no
+3.11.9 build). Bump the workflow and render.yaml together.
 
 ## Current state (2026-10-21)
 `main`: SCE weekly print timetable, Sapir quarter-hour blocks, missing-ToUnicode Hebrew

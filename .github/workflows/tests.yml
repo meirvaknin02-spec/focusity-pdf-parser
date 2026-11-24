@@ -9,7 +9,11 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the Python below must match render.yaml's
+    # PYTHON_VERSION (3.11.9), and ubuntu-latest moved to 26.04, which has no
+    # 3.11.9 build, so setup-python failed before any test ran (Oct-Nov 2026).
+    # Move both together when Render's Python is bumped.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
